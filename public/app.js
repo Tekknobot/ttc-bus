@@ -100,12 +100,13 @@ function renderNext(list){
     const cls=etaMin<=3?'eta good':(etaMin<=7?'eta warn':'eta');
     const label=routeLabel(it.routeId);
     const li=document.createElement('li');
-    li.innerHTML=`
-      <div class="row" style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:14px 16px">
+    li.innerHTML = `
+      <div class="row" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px">
         <div class="${cls}" style="font-size:22px;font-weight:800">${etaMin} min</div>
         <span class="pill" title="${label}" style="border:1px solid var(--border);padding:6px 10px;border-radius:999px;font-weight:700">${label}</span>
-        <div class="sub" style="color:var(--muted);font-size:12px">Stop #${it.stopId}</div>
-      </div>`;
+      </div>
+      <div class="sub" style="color:var(--muted);font-size:12px;padding:0 16px 8px">Stop #${it.stopId}</div>
+    `;
     ul.appendChild(li);
   }
 }
@@ -152,32 +153,62 @@ function updateWhere(){
 }
 
 // ---------- refresh ----------
-async function refresh(){
-  const spin=must('#spin'),status=must('#status'),err=must('#err'),foot=must('#foot');
-  try{
-    spin.style.display='inline-block';status.textContent='Updating…';err.textContent='';
-    if(!nearest) throw new Error('Pick a stop first.');
+async function refresh() {
+  const spin = must('#spin'),
+        status = must('#status'),
+        err = must('#err'),
+        foot = must('#foot');
+  try {
+    spin.style.display = 'inline-block';
+    status.textContent = 'Updating…';
+    err.textContent = '';
 
-    // STRICT: query ONLY the pinned stop id (no siblings)
+    if (!nearest) throw new Error('Pick a stop first.');
     const stopIdStr = String(nearest.stop_id);
-    const {updates}=await getTrips([stopIdStr]);
+    const { updates } = await getTrips([stopIdStr]);
+    const now = nowSec();
 
-    const now=nowSec();
-    const list=(updates||[])
-      .filter(u => String(u.stopId) === stopIdStr) // exact stop only
+    // Fallback: get current vehicles and cross-check their position
+    const { entity = [] } = await fetchJSON('/api/vehicles').catch(() => ({}));
+
+    const list = (updates || [])
+      .filter(u => String(u.stopId) === stopIdStr)
       .map(u => {
-        const t = (u.arrival ?? u.departure ?? null);
-        return t ? { routeId:u.routeId, stopId:u.stopId, eta:t - now } : null;
+        const t = u.arrival ?? u.departure;
+        const veh = entity.find(e =>
+          e.vehicle?.trip?.routeId === u.routeId ||
+          e.vehicle?.trip?.tripId === u.tripId
+        );
+        // geo-filter: keep only if vehicle is near the pinned stop
+        let nearby = true;
+        if (veh && veh.vehicle?.position) {
+          const d = haversine(
+            nearest.lat,
+            nearest.lon,
+            veh.vehicle.position.latitude,
+            veh.vehicle.position.longitude
+          );
+          nearby = d < 500; // within 500 m of pinned stop
+        }
+        return t && nearby
+          ? { routeId: u.routeId, stopId: u.stopId, eta: t - now }
+          : null;
       })
       .filter(Boolean)
-      .filter(x=>x.eta>-30)
-      .sort((a,b)=>a.eta-b.eta)
-      .slice(0,10);
+      .filter(x => x.eta > -30)
+      .sort((a, b) => a.eta - b.eta)
+      .slice(0, 10);
 
     renderNext(list);
-    lastStamp=new Date();foot.textContent=`Last updated ${lastStamp.toLocaleTimeString()}`;
-    must('#btnRefresh').hidden=false;
-  }catch(e){err.textContent=e.message;}finally{spin.style.display='none';status.textContent='Live';}
+    lastStamp = new Date();
+    foot.textContent = `Last updated ${lastStamp.toLocaleTimeString()}`;
+    must('#btnRefresh').hidden = false;
+  } catch (e) {
+    err.textContent = e.message;
+  } finally {
+    spin.style.display = 'none';
+    status.textContent = 'Live';
+  }
 }
 
 // ---------- bootstrap ----------
