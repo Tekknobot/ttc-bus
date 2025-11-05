@@ -140,6 +140,7 @@ function routeMatches(routePinned, item) {
 
 // ======= Render =======
 function renderWhere() {
+  // show only stop + distance + street (no route badge, no lat/lon)
   const cur = S.stops.find(s => String(s.stop_id) === String(S.stopId));
   const stopTxt = cur ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})` : "No stop";
   const street = cur ? extractStreet(cur.name) : null;
@@ -148,9 +149,6 @@ function renderWhere() {
   if (S.pin && cur) {
     const d = haversineMeters(S.pin, { lat: cur.lat, lon: cur.lon });
     tail += ` • <span class="meta">nearest:</span> <span class="dist">${fmtDist(d)}</span>`;
-  }
-  if (S.route) {
-    tail += ` • <span class="meta">route:</span> <span class="dist">${escapeHtml(S.route)}</span>`;
   }
   if (street) {
     tail += ` • <span class="meta">street:</span> <span class="dist">${escapeHtml(street)}</span>`;
@@ -166,15 +164,16 @@ function rowHTML(a) {
   const whenSec = parseToEpochSeconds(a.arrival_time);
   const min = minsFromNow(whenSec);
   const klass = etaClass(min);
-  // show just the short number (or route_id fallback)
-  const routeTxt = escapeHtml(a.route_short_name ?? a.route_id ?? "");
-  const head = escapeHtml(a.headsign ?? "");
-  const sub = a.__sub ?? "";
+
+  // no route number; just optional headsign and the location subline
+  const head = escapeHtml(a.headsign || "");
+  const sub  = a.__sub ?? "";
+
   return `
     <li>
       <div class="row">
         <div>
-          <div style="font-weight:700; letter-spacing:.2px">${routeTxt}${head ? " · " + head : ""}</div>
+          <div style="font-weight:700; letter-spacing:.2px">${head}</div>
           <div class="sub">${sub}</div>
         </div>
         <div class="eta ${klass}">${fmtEta(min)}</div>
@@ -185,7 +184,7 @@ function rowHTML(a) {
 function renderList(items) {
   clear(els.list);
   if (!items?.length) {
-    els.list.innerHTML = `<div class="empty">No upcoming trips${S.route ? ` for route ${escapeHtml(S.route)}` : ""}.</div>`;
+    els.list.innerHTML = `<div class="empty">No upcoming trips.</div>`;
     return;
   }
   els.list.innerHTML = items.map(rowHTML).join("");
