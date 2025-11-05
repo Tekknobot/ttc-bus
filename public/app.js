@@ -26,6 +26,8 @@ const S = {
   stopId: null,       // string
   route: null,        // string (short name or route_id)
   stops: [],          // [{ stop_id, name, lat, lon }]
+  routesByShort: new Map(), // "72" -> "Pape"
+  routesById: new Map(),    // "72" -> "Pape" (if route_id matches)
   timer: undefined,
 };
 
@@ -35,7 +37,7 @@ function hide(el) { if (el) el.style.display = "none"; }
 function setText(el, txt) { if (el) el.textContent = txt ?? ""; }
 function clear(el) { if (el) el.innerHTML = ""; }
 function escapeHtml(s) {
-  return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+  return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">", "&gt;").replaceAll('"',"&quot;");
 }
 function titleCase(s) {
   return String(s).toLowerCase().replace(/\b([a-z])/g, (_,c)=>c.toUpperCase());
@@ -84,7 +86,7 @@ function getParams() {
   const sp = new URLSearchParams(window.location.search);
   const stopId = sp.get("stop") || null;
   const pinStr = sp.get("pin");
-  const route = sp.get("route"); // short name or route_id
+  const route = sp.get("route"); // short name or route_id (e.g., "72")
   let pin = null;
   if (pinStr) {
     const [a,b] = pinStr.split(",").map(x => x.trim());
@@ -102,9 +104,10 @@ function loadRoute() { try { return localStorage.getItem(K.ROUTE) || null; } cat
 
 // ======= API =======
 async function api(path) { const r = await fetch(path,{credentials:"same-origin"}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.json(); }
-const getStops = () => api("/api/stops");
-const getArrivals = (stopId) => api(`/api/trip-updates?stop_id=${encodeURIComponent(String(stopId))}`);
-const getVehicles = () => api("/api/vehicles"); // simplified payload from server
+const getStops   = () => api("/api/stops");
+const getArrivals= (stopId) => api(`/api/trip-updates?stop_id=${encodeURIComponent(String(stopId))}`);
+const getVehicles= () => api("/api/vehicles"); // simplified payload from server
+const getRoutes  = () => api("/api/routes");
 
 // ======= Core helpers =======
 function nearestStop(stops, pin) {
@@ -138,9 +141,20 @@ function routeMatches(routePinned, item) {
   return a === q || b === q;
 }
 
+// Build a nice label for the pinned route using /api/routes
+function routeLabel(routePinned) {
+  if (!routePinned) return null;
+  const key = String(routePinned).trim();
+  const longA = S.routesByShort.get(key.toLowerCase());
+  const longB = S.routesById.get(key.toLowerCase());
+  const long = longA || longB || null;
+  if (long) return `${key} ${long}`;
+  return key; // fallback to whatever was pinned
+}
+
 // ======= Render =======
 function renderWhere() {
-  const pinTxt = S.pin ? `${S.pin.lat.toFixed(5)}, ${S.pin.lon.toFixed(5)}` : "—";
+  // No coordinates shown here per request
   const cur = S.stops.find(s => String(s.stop_id) === String(S.stopId));
   const stopTxt = cur ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})` : "No stop";
   const street = cur ? extractStreet(cur.name) : null;
@@ -151,10 +165,14 @@ function renderWhere() {
     tail += ` • <span class="meta">nearest:</span> <span class="dist">${fmtDist(d)}</span>`;
   }
   if (S.route) {
-    tail += ` • <span class="meta">route:</span> <span class="dist">${escapeHtml(S.route)}</span>`;
+    const rl = routeLabel(S.route);
+    tail += ` • <span class="meta">route:</span> <span class="dist">${escapeHtml(rl)}</span>`;
+  }
+  if (street) {
+    tail += ` • <span class="meta">street:</span> <span class="dist">${escapeHtml(street)}</span>`;
   }
 
-  els.where.innerHTML = `${pinTxt} • ${stopTxt}${tail}${street ? ` • <span class="meta">street:</span> <span class="dist">${escapeHtml(street)}</span>` : ""}`;
+  els.where.innerHTML = `${stopTxt}${tail}`;
 }
 function renderFootStamp() {
   const ts = new Date();
@@ -182,7 +200,8 @@ function rowHTML(a) {
 function renderList(items) {
   clear(els.list);
   if (!items?.length) {
-    els.list.innerHTML = `<div class="empty">No upcoming trips${S.route ? ` for route ${escapeHtml(S.route)}` : ""}.</div>`;
+    const rl = S.route ? routeLabel(S.route) : null;
+    els.list.innerHTML = `<div class="empty">No upcoming trips${rl ? ` for ${escapeHtml(rl)}` : ""}.</div>`;
     return;
   }
   els.list.innerHTML = items.map(rowHTML).join("");
@@ -294,8 +313,19 @@ async function boot() {
     if (urlPin) { S.pin = urlPin; savePin(S.pin); }
     if (urlRoute) { S.route = urlRoute; saveRoute(S.route); }
 
-    // Load stops catalog
-    S.stops = await getStops();
+    // Load static catalogs
+    const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
+    S.stops = stops || [];
+
+    // Build route maps for labels
+    S.routesByShort.clear(); S.routesById.clear();
+    (routes || []).forEach(r => {
+      const short = (r.short_name || "").toString().trim();
+      const rid   = (r.route_id || "").toString().trim();
+      const long  = (r.long_name || "").toString().trim();
+      if (short) S.routesByShort.set(short.toLowerCase(), long || rid || short);
+      if (rid)   S.routesById.set(rid.toLowerCase(), long || short || rid);
+    });
 
     // Pin fallback chain
     if (!S.pin) {
