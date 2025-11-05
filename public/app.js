@@ -140,21 +140,48 @@ function routeMatches(routePinned, item) {
 
 // ======= Render =======
 function renderWhere() {
-  // show only stop + distance + street (no route badge, no lat/lon)
+  // Stack: Stop (bold), Street, Nearest — no route, no lat/lon
   const cur = S.stops.find(s => String(s.stop_id) === String(S.stopId));
-  const stopTxt = cur ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})` : "No stop";
-  const street = cur ? extractStreet(cur.name) : null;
+  const stopLine = cur
+    ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})`
+    : "No stop selected";
+  const streetLine = cur ? extractStreet(cur.name) : null;
 
-  let tail = "";
+  let nearestLine = null;
   if (S.pin && cur) {
     const d = haversineMeters(S.pin, { lat: cur.lat, lon: cur.lon });
-    tail += ` • <span class="meta">nearest:</span> <span class="dist">${fmtDist(d)}</span>`;
-  }
-  if (street) {
-    tail += ` • <span class="meta">street:</span> <span class="dist">${escapeHtml(street)}</span>`;
+    nearestLine = fmtDist(d);
   }
 
-  els.where.innerHTML = `${stopTxt}${tail}`;
+  // Build stacked rows; only render rows that exist
+  const rows = [];
+  rows.push(
+    `<div style="font-weight:700">${stopLine}</div>`
+  );
+  if (streetLine) {
+    rows.push(
+      `<div class="meta" style="color:var(--muted)">Street: <span style="color:inherit">${escapeHtml(streetLine)}</span></div>`
+    );
+  }
+  if (nearestLine) {
+    rows.push(
+      `<div class="meta" style="color:var(--muted)">Nearest: <span class="dist" style="font-weight:800;color:inherit">${nearestLine}</span></div>`
+    );
+  }
+
+  // Single child container so the parent .where (which is flex-row) won’t try to lay out multiple columns
+  els.where.innerHTML = `
+    <div style="
+      display:grid;
+      grid-template-columns: 1fr;
+      row-gap: 2px;
+      line-height: 1.35;
+      min-width: 0;
+      word-break: break-word;
+    ">
+      ${rows.join("")}
+    </div>
+  `;
 }
 function renderFootStamp() {
   const ts = new Date();
