@@ -54,6 +54,10 @@ const routesById=Object.create(null), stopsById=Object.create(null);
 const LOCAL_KEY='ttcChosenStopId';
 const SUSPICIOUS_M=300; // prompt chooser if pin->stop is farther than this
 
+// Route filtering state
+let selectedRouteShort = null; // e.g. "52"
+const ROUTE_KEY='ttcChosenRouteShort';
+
 // ---------- index builders ----------
 function buildRouteIndexes(routes){
   for(const r of routes||[]){
@@ -82,17 +86,59 @@ function pickNearest(stops,lat,lon){
   return best;
 }
 
+function allowedRouteIdsForShortName(short) {
+  if (!short) return null;
+  const want = String(short).trim();
+  if (!want) return null;
+  const s = new Set();
+  for (const r of Object.values(routesById)) {
+    if (String(r?.short_name) === want && r?.route_id != null) s.add(String(r.route_id));
+  }
+  return s.size ? s : null;
+}
+
+function setRouteFilter(short) {
+  selectedRouteShort = short && String(short).trim() ? String(short).trim() : null;
+  if (selectedRouteShort) {
+    localStorage.setItem(ROUTE_KEY, selectedRouteShort);
+  } else {
+    localStorage.removeItem(ROUTE_KEY);
+  }
+  updateWhere();
+  refresh();
+}
+
 // ---------- UI ----------
 function renderNext(list){
   const ul=must('#list'); ul.innerHTML='';
   const whereBar=must('#where');
+
+  // Buttons (only once)
   if(!document.getElementById('btnChangeStop')){
-    const btn=`<button id="btnChangeStop" style="margin-left:8px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Change stop</button>`;
-    whereBar.insertAdjacentHTML('beforeend',btn);
+    const btns=`
+      <button id="btnChangeStop" style="margin-left:8px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Change stop</button>
+      <button id="btnRouteFilter" style="margin-left:8px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Filter route</button>
+      <button id="btnClearRoute" style="margin-left:8px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Clear</button>
+    `;
+    whereBar.insertAdjacentHTML('beforeend',btns);
     $('#btnChangeStop').onclick=openChooser;
+    $('#btnRouteFilter').onclick=async()=>{
+      const v=prompt('Enter route number (short name), e.g. 32');
+      if(v==null) return; // cancel
+      const trimmed=String(v).trim();
+      if(!trimmed){ setRouteFilter(null); return; }
+      const allowed=allowedRouteIdsForShortName(trimmed);
+      if(!allowed){
+        alert(`No routes with short_name "${trimmed}" found.`);
+        return;
+      }
+      setRouteFilter(trimmed);
+    };
+    $('#btnClearRoute').onclick=()=>setRouteFilter(null);
   }
+
   if(!list.length){
-    ul.innerHTML=`<li class="empty">No live predictions right now for this stop.</li>`;
+    ul.innerHTML=`<li class="empty">No live predictions right now for this stop${selectedRouteShort?` on route ${selectedRouteShort}`:''}.</li>`;
     return;
   }
   for(const it of list){
@@ -147,9 +193,14 @@ function populateChooser(){
 // ---------- helpers ----------
 function updateWhere(){
   const w=must('#where');
+  const dist = pin?`<span class="dist">${fmtKm(haversine(pin.lat,pin.lon,nearest.lat,nearest.lon))} from pin</span>`:'';
+  const routeChip = selectedRouteShort
+    ? `<span class="pill" style="margin-left:8px;border:1px solid var(--border);padding:4px 8px;border-radius:999px;font-weight:700">Route ${selectedRouteShort}</span>`
+    : '';
   w.innerHTML=`<span>${nearest.name}</span>
     <span class="meta">(#${nearest.stop_id})</span>
-    ${pin?`<span class="dist">${fmtKm(haversine(pin.lat,pin.lon,nearest.lat,nearest.lon))} from pin</span>`:''}`;
+    ${routeChip}
+    ${dist}`;
 }
 
 // ---------- refresh ----------
@@ -181,6 +232,10 @@ async function refresh() {
 
     const now = nowSec();
 
+    // If a route number (short_name) is chosen, precompute allowed route_ids
+    const allowedRouteIds =
+      selectedRouteShort ? allowedRouteIdsForShortName(selectedRouteShort) : null;
+
     const list = updates
       // accept various possible key names for stop id
       .filter(u => {
@@ -200,12 +255,15 @@ async function refresh() {
         const tid = pick(u, 'tripId', 'trip_id', 'trip');
         const sid = pick(u, 'stopId', 'stop_id', 'stop');
 
+        // Apply route-number (short_name) filter by mapping to route_ids
+        if (allowedRouteIds && !allowedRouteIds.has(String(rid))) return null;
+
         // try to match a vehicle, but don't require one
         const veh = entity.find(e => {
           const trip  = e?.vehicle?.trip || {};
           const vrid  = pick(trip, 'routeId', 'route_id');
           const vtid  = pick(trip, 'tripId', 'trip_id');
-          return (vrid != null && vrid === rid) || (vtid != null && vtid === tid);
+          return (vrid != null && String(vrid) === String(rid)) || (vtid != null && vtid === tid);
         });
 
         let good = true;
@@ -242,6 +300,10 @@ async function bootstrap(){
     if(_clockSkewMs===0) await syncServerTime();
     const [stops,routes]=await Promise.all([getStops(),getRoutes()]);
     allStops=stops||[];buildRouteIndexes(routes);buildStopIndex(allStops);
+
+    // restore route filter
+    const savedRouteShort = localStorage.getItem(ROUTE_KEY);
+    if (savedRouteShort) selectedRouteShort = savedRouteShort;
 
     const saved=localStorage.getItem(LOCAL_KEY);
     if(saved&&stopsById[saved]){
