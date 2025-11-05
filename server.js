@@ -16,7 +16,7 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const PROTO_PATH = path.join(ROOT, 'gtfs-realtime.proto');
 
-// **** Use a writable, ephemeral dir (serverless-friendly) ****
+// Writable data dir (serverless friendly)
 const DATA_DIR = process.env.DATA_DIR || os.tmpdir();
 const STOPS_PATH  = path.join(DATA_DIR, 'stops.json');
 const ROUTES_PATH = path.join(DATA_DIR, 'routes.json');
@@ -36,14 +36,15 @@ async function loadProto() {
   return FeedMessage;
 }
 
-// tiny memory cache (API responses) + in-memory GTFS static data
+// Tiny memory cache for upstream
 const cache = new Map();
 const getCache = (k)=>{ const v = cache.get(k); if(!v) return null; if(Date.now()>v.exp){cache.delete(k);return null;} return v.data; };
 const putCache = (k,d,ttl=10000)=>cache.set(k,{data:d,exp:Date.now()+ttl});
-let stopsMem = null;
-let routesMem = null;
 
-// Fetch helper
+let stopsMem = null;   // [{ stop_id, stop_code, name, lat, lon }]
+let routesMem = null;  // [{ route_id, short_name, long_name }]
+
+// helpers
 async function fetchBufferOrDie(url) {
   const r = await fetch(url, {
     redirect: 'follow',
@@ -62,7 +63,7 @@ async function fetchBufferOrDie(url) {
   return Buffer.from(await r.arrayBuffer());
 }
 
-// CSV that handles quoted commas and escaped quotes
+// Basic CSV (handles quotes)
 function parseCsv(text) {
   const lines = text.split(/\r?\n/);
   const out = [];
@@ -87,20 +88,14 @@ function parseCsv(text) {
 async function ensureGtfsZip() {
   if (fs.existsSync(TMP_GTFS_ZIP)) return;
   const buf = await fetchBufferOrDie(GTFS_ZIP_URL);
-  // Best effort write; /tmp is writable on serverless
-  try { fs.writeFileSync(TMP_GTFS_ZIP, buf); } catch { /* ignore */ }
+  try { fs.writeFileSync(TMP_GTFS_ZIP, buf); } catch {}
 }
 
 async function ensureStops() {
   if (stopsMem) return;
-  // Try reading from /tmp
   if (fs.existsSync(STOPS_PATH)) {
-    try {
-      stopsMem = JSON.parse(fs.readFileSync(STOPS_PATH, 'utf-8'));
-      return;
-    } catch { /* fall through to rebuild */ }
+    try { stopsMem = JSON.parse(fs.readFileSync(STOPS_PATH, 'utf-8')); return; } catch {}
   }
-  // Build from ZIP
   await ensureGtfsZip();
   const zip = new AdmZip(TMP_GTFS_ZIP);
   const entry = zip.getEntry('stops.txt') || zip.getEntries().find(e => /(^|\/)stops\.txt$/i.test(e.entryName));
@@ -116,20 +111,16 @@ async function ensureStops() {
     stop_code: cols[idx.stop_code] || null,
     name: cols[idx.stop_name],
     lat: Number(cols[idx.stop_lat]),
-    lon: Number(cols[idx.stop_lon])
-  })).filter(s => Number.isFinite(s.lat) && Number.isFinite(s.lon));
+    lon: Number(cols[idx.stop_lon]),
+  })).filter(s => s.stop_id && Number.isFinite(s.lat) && Number.isFinite(s.lon));
 
-  // Best effort cache to /tmp
-  try { fs.writeFileSync(STOPS_PATH, JSON.stringify(stopsMem)); } catch { /* ignore */ }
+  try { fs.writeFileSync(STOPS_PATH, JSON.stringify(stopsMem)); } catch {}
 }
 
 async function ensureRoutes() {
   if (routesMem) return;
   if (fs.existsSync(ROUTES_PATH)) {
-    try {
-      routesMem = JSON.parse(fs.readFileSync(ROUTES_PATH, 'utf-8'));
-      return;
-    } catch { /* fall through */ }
+    try { routesMem = JSON.parse(fs.readFileSync(ROUTES_PATH, 'utf-8')); return; } catch {}
   }
   await ensureGtfsZip();
   const zip = new AdmZip(TMP_GTFS_ZIP);
@@ -147,8 +138,10 @@ async function ensureRoutes() {
     long_name: cols[idx.route_long_name] || ''
   })).filter(r => r.route_id);
 
-  try { fs.writeFileSync(ROUTES_PATH, JSON.stringify(routesMem)); } catch { /* ignore */ }
+  try { fs.writeFileSync(ROUTES_PATH, JSON.stringify(routesMem)); } catch {}
 }
+
+const BASE = 'https://bustime.ttc.ca/gtfsrt';
 
 async function fetchGtfsRt(url){
   const hit = getCache(url); if (hit) return hit;
@@ -168,77 +161,113 @@ async function fetchGtfsRt(url){
   return object;
 }
 
+// ===== API =====
 app.get('/api/health', (_req, res) => {
-  res.setHeader('Content-Type','application/json');
   res.json({ ok: true, ts: Date.now() });
 });
 
 app.get('/api/stops', async (_req,res)=>{
-  res.setHeader('Content-Type','application/json');
   try { await ensureStops(); res.json(stopsMem || []); }
   catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
 });
 
 app.get('/api/routes', async (_req,res)=>{
-  res.setHeader('Content-Type','application/json');
   try { await ensureRoutes(); res.json(routesMem || []); }
   catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
 });
 
-const BASE = 'https://bustime.ttc.ca/gtfsrt';
-
+/**
+ * Trip updates normalized for the client:
+ * GET /api/trip-updates?stop_id=1234              (single)
+ * GET /api/trip-updates?stop_id=1234,5678,9012    (multiple ok; client calls per-stop anyway)
+ * Response: { stop_id: "1234", arrivals: [{ route_id, route_short_name, headsign?, arrival_time }] }
+ */
 app.get('/api/trip-updates', async (req,res)=>{
   res.setHeader('Content-Type','application/json');
   try {
-    const raw = (req.query.stop || '').toString();
-    const stopSet = new Set(raw.split(',').map(s=>s.trim()).filter(Boolean));
+    await ensureRoutes();
+    const stopParam = (req.query.stop_id ?? req.query.stop ?? "").toString().trim();
+    const stopIds = stopParam
+      ? stopParam.split(',').map(s=>s.trim()).filter(Boolean)
+      : []; // empty means "all" (but we'll still return per-stop objects)
+
     const feed = await fetchGtfsRt(`${BASE}/trips`);
-    const updates = [];
-    for (const e of feed.entity || []) {
+    const byStop = new Map(); // stop_id -> array
+    const routeShort = new Map(routesMem.map(r => [r.route_id, r.short_name || r.long_name || r.route_id]));
+
+    for (const e of (feed.entity || [])) {
       const tu = e.tripUpdate || e.trip_update;
       if (!tu || !tu.stopTimeUpdate) continue;
-      const routeId = (tu.trip && (tu.trip.routeId || tu.trip.route_id)) || null;
-      const tripId  = (tu.trip && (tu.trip.tripId  || tu.trip.trip_id )) || null;
+
+      const trip = tu.trip || {};
+      const routeId = trip.routeId || trip.route_id || null;
+      const short = routeShort.get(routeId) || routeId || null;
+
       for (const stu of tu.stopTimeUpdate) {
-        const stopId = stu.stopId || stu.stop_id;
-        if (!stopSet.size || stopSet.has(stopId)) {
-          const arrival = (stu.arrival && stu.arrival.time) || (stu.departure && stu.departure.time) || null;
-          updates.push({ stopId, routeId, tripId, arrival });
-        }
+        const sid = String(stu.stopId || stu.stop_id || "");
+        if (!sid) continue;
+        if (stopIds.length && !stopIds.includes(sid)) continue;
+
+        const arrival =
+          (stu.arrival && (Number(stu.arrival.time) || Number(stu.arrival.delay && 0))) ||
+          (stu.departure && Number(stu.departure.time)) ||
+          null;
+
+        const arr = byStop.get(sid) || [];
+        arr.push({
+          route_id: routeId,
+          route_short_name: short,
+          headsign: null,          // not available in GTFS-RT; left null for client
+          arrival_time: arrival,   // epoch seconds preferred by client
+        });
+        byStop.set(sid, arr);
       }
     }
-    res.json({ updates, matchedStops: Array.from(stopSet) });
+
+    // If multiple were requested, return for the first one (client calls per stop)
+    const pick = stopIds.length ? stopIds[0] : (byStop.keys().next().value || (stopIds[0] || null));
+    const arrivals = (pick && byStop.get(pick)) ? byStop.get(pick) : [];
+    // Sort soonest first
+    arrivals.sort((a,b) => (a.arrival_time ?? Infinity) - (b.arrival_time ?? Infinity));
+
+    res.json({ stop_id: pick || (stopIds[0] || null), arrivals });
   } catch(e){
     res.status(e.status || 500).json({ error: String(e), details: e.details || null });
   }
 });
 
+/**
+ * Vehicles (simplified) for proximity fallback:
+ * Response: [{ route_id, route_short_name?, headsign?, lat, lon, label? }]
+ */
 app.get('/api/vehicles', async (_req,res)=>{
   res.setHeader('Content-Type','application/json');
   try {
+    await ensureRoutes();
     const feed = await fetchGtfsRt(`${BASE}/vehicles`);
-    res.json(feed);
+    const routeShort = new Map(routesMem.map(r => [r.route_id, r.short_name || r.long_name || r.route_id]));
+
+    const out = [];
+    for (const e of (feed.entity || [])) {
+      const veh = e.vehicle || e.vehiclePosition || {};
+      if (!veh.position) continue;
+      const trip = veh.trip || {};
+      out.push({
+        route_id: trip.routeId || trip.route_id || null,
+        route_short_name: routeShort.get(trip.routeId || trip.route_id) || null,
+        headsign: null,
+        lat: Number(veh.position.latitude),
+        lon: Number(veh.position.longitude),
+        label: veh.vehicle && (veh.vehicle.label || veh.vehicle.id) || null,
+      });
+    }
+    res.json(out);
   } catch(e){
     res.status(e.status || 500).json({ error: String(e), details: e.details || null });
   }
 });
 
-// tiny sanity check
-app.get('/api/debug-rt', async (_req, res) => {
-  try {
-    const v = await fetchGtfsRt(`${BASE}/vehicles`);
-    const t = await fetchGtfsRt(`${BASE}/trips`);
-    res.json({
-      ok: true,
-      vehicles_sample: (v.entity || []).slice(0, 3).map(e => e.id),
-      trips_sample: (t.entity || []).slice(0, 3).map(e => e.id),
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ error: String(e), details: e.details || null });
-  }
-});
-
-// Static files (fine on serverless if bundled in /public)
+// Static & catch-all
 app.use(express.static(PUBLIC_DIR));
 app.get('*', (_req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
