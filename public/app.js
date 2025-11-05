@@ -152,6 +152,16 @@ function routeLabel(routePinned) {
   return key; // fallback to whatever was pinned
 }
 
+// Build a label for an arrival item (prefers route_short_name, falls back to route_id)
+function labelForItem(item) {
+  const key = (item.route_short_name || item.route_id || "").toString().trim();
+  if (!key) return "";
+  const longA = S.routesByShort.get(key.toLowerCase());
+  const longB = S.routesById.get(key.toLowerCase());
+  const long = longA || longB || null;
+  return long ? `${key} ${long}` : key;
+}
+
 // ======= Render =======
 function renderWhere() {
   // No coordinates shown here per request
@@ -182,14 +192,15 @@ function rowHTML(a) {
   const whenSec = parseToEpochSeconds(a.arrival_time);
   const min = minsFromNow(whenSec);
   const klass = etaClass(min);
-  const route = escapeHtml(a.route_short_name ?? a.route_id ?? "");
+  // show "72 Pape" (or similar) instead of just "72"
+  const routeLabelText = escapeHtml(labelForItem(a));
   const head = escapeHtml(a.headsign ?? "");
   const sub = a.__sub ?? "";
   return `
     <li>
       <div class="row">
         <div>
-          <div style="font-weight:700; letter-spacing:.2px">${route}${head ? " · " + head : ""}</div>
+          <div style="font-weight:700; letter-spacing:.2px">${routeLabelText}${head ? " · " + head : ""}</div>
           <div class="sub">${sub}</div>
         </div>
         <div class="eta ${klass}">${fmtEta(min)}</div>
