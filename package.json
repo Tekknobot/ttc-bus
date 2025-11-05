@@ -1,14 +1,18 @@
 {
-  "name": "ttc-bus",
+  "name": "ttc-arrivals-nearest",
+  "version": "1.0.0",
   "private": true,
-  "version": "1.1.0",
-  "description": "TTC nearest stop + live arrivals (Node + protobufjs).",
+  "description": "Live TTC arrivals for nearest stop (GTFS-RT)",
+  "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js"
   },
   "dependencies": {
-    "adm-zip": "^0.5.10",
+    "adm-zip": "^0.5.12",
     "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
     "protobufjs": "^7.2.6"
   }
 }

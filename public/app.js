@@ -123,6 +123,10 @@ async function refresh(){
     status.textContent = 'Updating…';
     err.textContent = '';
 
+    if (!nearest) {
+      throw new Error('App not initialized yet (no nearest stop).');
+    }
+
     const ids = [nearest.stop_id, ...siblings.map(s=>s.stop_id)];
     const { updates } = await getTrips(ids);
 
@@ -146,7 +150,7 @@ async function refresh(){
         if (d <= 400) {
           const rid = veh.trip?.routeId || veh.trip?.route_id;
           near.push({
-            routeId: rid,
+            routeId: rid || '—',
             stopId: veh.stopId || veh.stop_id || 'nearby',
             eta: null,
             detail: `${Math.round(d)} metres away`
@@ -171,21 +175,14 @@ async function refresh(){
   }
 }
 
-// ---------- init (runs after DOM because of `defer`) ----------
-function init(){
-  ['#status','#err','#spin','#where','#list','#foot','#btnRefresh'].forEach(must);
-
+// ---------- boot helpers ----------
+async function bootstrapWithCoords(lat, lon) {
   const status = must('#status');
   const where  = must('#where');
+  const err    = must('#err');
 
-  if (!('geolocation' in navigator)) {
-    status.textContent = 'Geolocation not supported.';
-    return;
-  }
-
-  navigator.geolocation.getCurrentPosition(async pos=>{
-    user = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-
+  try {
+    user = { lat, lon };
     const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
     buildRouteIndexes(routes);
 
@@ -200,10 +197,35 @@ function init(){
 
     await refresh();
     setInterval(refresh, 10000);
-  }, err=>{
-    status.textContent = 'Location error';
-    must('#err').textContent = err.message;
-  }, { enableHighAccuracy:true, timeout:10000 });
+    status.textContent = 'Live';
+  } catch (e) {
+    status.textContent = 'Startup error';
+    err.textContent = e.message || String(e);
+  }
+}
+
+// ---------- init (runs after DOM because of `defer`) ----------
+function init(){
+  ['#status','#err','#spin','#where','#list','#foot','#btnRefresh'].forEach(must);
+
+  const status = must('#status');
+
+  // Geolocation fallback for non-HTTPS origins (still usable)
+  if (!('geolocation' in navigator)) {
+    status.textContent = 'No geolocation — using fallback location.';
+    must('#err').textContent = 'Enable location (HTTPS required) for exact nearest stop.';
+    // Downtown-ish fallback; change if you like
+    bootstrapWithCoords(43.645, -79.380);
+  } else {
+    navigator.geolocation.getCurrentPosition(async pos=>{
+      await bootstrapWithCoords(pos.coords.latitude, pos.coords.longitude);
+    }, err=>{
+      status.textContent = 'Location error';
+      must('#err').textContent = err.message;
+      // Still let the app run in a sensible place
+      bootstrapWithCoords(43.645, -79.380);
+    }, { enableHighAccuracy:true, timeout:10000 });
+  }
 
   must('#btnRefresh').addEventListener('click', refresh);
 }

@@ -5,6 +5,12 @@ const os = require('os');
 const AdmZip = require('adm-zip');
 const protobuf = require('protobufjs');
 
+// Polyfill fetch for Node < 18 using node-fetch (ESM)
+if (typeof fetch === 'undefined') {
+  global.fetch = (...args) =>
+    import('node-fetch').then(({ default: f }) => f(...args));
+}
+
 const app = express();
 const PORT = process.env.PORT || 5173;
 const ROOT = __dirname;
@@ -30,14 +36,28 @@ async function loadProto() {
 
 // tiny memory cache
 const cache = new Map();
-const getCache = (k)=>{ const v = cache.get(k); if(!v) return null; if(Date.now()>v.exp){cache.delete(k);return null;} return v.data; };
-const putCache = (k,d,ttl=10000)=>cache.set(k,{data:d,exp:Date.now()+ttl});
+const getCache = (k) => {
+  const v = cache.get(k);
+  if (!v) return null;
+  if (Date.now() > v.exp) {
+    cache.delete(k);
+    return null;
+  }
+  return v.data;
+};
+const putCache = (k, d, ttl = 10000) => cache.set(k, { data: d, exp: Date.now() + ttl });
 
-// Fetch with explicit error text (Node 18+ has fetch)
+// Fetch with explicit error text
 async function fetchBufferOrDie(url) {
-  const r = await fetch(url, { redirect: "follow" });
+  const r = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'Accept': 'application/x-protobuf, application/octet-stream;q=0.9, */*;q=0.1',
+      'User-Agent': 'ttc-arrivals/1.0 (+ops@yourdomain)'
+    }
+  });
   if (!r.ok) {
-    const text = await r.text().catch(()=>`<no body>`);
+    const text = await r.text().catch(() => `<no body>`);
     const err = new Error(`Upstream ${r.status} ${r.statusText}`);
     err.details = text.slice(0, 400);
     err.status = r.status;
@@ -57,10 +77,10 @@ function parseCsv(text) {
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
       if (ch === '"') {
-        if (inQ && line[i+1] === '"') { cur += '"'; i++; continue; }
+        if (inQ && line[i + 1] === '"') { cur += '"'; i++; continue; }
         inQ = !inQ; continue;
       }
-      if (ch === ',' && !inQ) { row.push(cur); cur=''; } else { cur += ch; }
+      if (ch === ',' && !inQ) { row.push(cur); cur = ''; } else { cur += ch; }
     }
     row.push(cur);
     out.push(row);
@@ -79,13 +99,15 @@ async function ensureStops() {
   console.log('Downloading TTC GTFS (zip) and extracting stops…');
   await ensureGtfsZip();
   const zip = new AdmZip(TMP_GTFS_ZIP);
-  const entry = zip.getEntry('stops.txt');
+  const entry =
+    zip.getEntry('stops.txt') ||
+    zip.getEntries().find(e => /(^|\/)stops\.txt$/i.test(e.entryName));
   if (!entry) throw new Error('stops.txt not found in GTFS zip');
   const csv = entry.getData().toString('utf-8');
 
   const rows = parseCsv(csv);
   const headers = rows.shift();
-  const idx = Object.fromEntries(headers.map((h,i)=>[h,i]));
+  const idx = Object.fromEntries(headers.map((h, i) => [h, i]));
 
   const stops = rows.map(cols => ({
     stop_id: cols[idx.stop_id],
@@ -104,13 +126,15 @@ async function ensureRoutes() {
   console.log('Extracting TTC GTFS (routes)…');
   await ensureGtfsZip();
   const zip = new AdmZip(TMP_GTFS_ZIP);
-  const entry = zip.getEntry('routes.txt');
+  const entry =
+    zip.getEntry('routes.txt') ||
+    zip.getEntries().find(e => /(^|\/)routes\.txt$/i.test(e.entryName));
   if (!entry) throw new Error('routes.txt not found in GTFS zip');
   const csv = entry.getData().toString('utf-8');
 
   const rows = parseCsv(csv);
   const headers = rows.shift();
-  const idx = Object.fromEntries(headers.map((h,i)=>[h,i]));
+  const idx = Object.fromEntries(headers.map((h, i) => [h, i]));
 
   const routes = rows.map(cols => ({
     route_id: cols[idx.route_id],
@@ -122,7 +146,7 @@ async function ensureRoutes() {
   console.log(`Wrote ${routes.length} routes to ${ROUTES_PATH}`);
 }
 
-async function fetchGtfsRt(url){
+async function fetchGtfsRt(url) {
   const hit = getCache(url); if (hit) return hit;
   const buf = await fetchBufferOrDie(url);
   const FM = await loadProto();
@@ -141,36 +165,36 @@ async function fetchGtfsRt(url){
 }
 
 app.get('/api/health', (_req, res) => {
-  res.setHeader('Content-Type','application/json');
+  res.setHeader('Content-Type', 'application/json');
   res.json({ ok: true, ts: Date.now() });
 });
 
-app.get('/api/stops', async (_req,res)=>{
-  res.setHeader('Content-Type','application/json');
+app.get('/api/stops', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try { await ensureStops(); res.sendFile(STOPS_PATH); }
-  catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
+  catch (e) { res.status(500).json({ error: String(e), details: e.details || null }); }
 });
 
-app.get('/api/routes', async (_req,res)=>{
-  res.setHeader('Content-Type','application/json');
+app.get('/api/routes', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try { await ensureRoutes(); res.sendFile(ROUTES_PATH); }
-  catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
+  catch (e) { res.status(500).json({ error: String(e), details: e.details || null }); }
 });
 
 const BASE = 'https://bustime.ttc.ca/gtfsrt';
 
-app.get('/api/trip-updates', async (req,res)=>{
-  res.setHeader('Content-Type','application/json');
+app.get('/api/trip-updates', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
     const raw = (req.query.stop || '').toString();
-    const stopSet = new Set(raw.split(',').map(s=>s.trim()).filter(Boolean));
+    const stopSet = new Set(raw.split(',').map(s => s.trim()).filter(Boolean));
     const feed = await fetchGtfsRt(`${BASE}/trips`);
     const updates = [];
     for (const e of feed.entity || []) {
       const tu = e.tripUpdate || e.trip_update;
       if (!tu || !tu.stopTimeUpdate) continue;
       const routeId = (tu.trip && (tu.trip.routeId || tu.trip.route_id)) || null;
-      const tripId  = (tu.trip && (tu.trip.tripId  || tu.trip.trip_id )) || null;
+      const tripId = (tu.trip && (tu.trip.tripId || tu.trip.trip_id)) || null;
       for (const stu of tu.stopTimeUpdate) {
         const stopId = stu.stopId || stu.stop_id;
         if (!stopSet.size || stopSet.has(stopId)) {
@@ -180,17 +204,32 @@ app.get('/api/trip-updates', async (req,res)=>{
       }
     }
     res.json({ updates, matchedStops: Array.from(stopSet) });
-  } catch(e){
+  } catch (e) {
     res.status(e.status || 500).json({ error: String(e), details: e.details || null });
   }
 });
 
-app.get('/api/vehicles', async (_req,res)=>{
-  res.setHeader('Content-Type','application/json');
+app.get('/api/vehicles', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
     const feed = await fetchGtfsRt(`${BASE}/vehicles`);
     res.json(feed);
-  } catch(e){
+  } catch (e) {
+    res.status(e.status || 500).json({ error: String(e), details: e.details || null });
+  }
+});
+
+// tiny sanity check
+app.get('/api/debug-rt', async (_req, res) => {
+  try {
+    const v = await fetchGtfsRt(`${BASE}/vehicles`);
+    const t = await fetchGtfsRt(`${BASE}/trips`);
+    res.json({
+      ok: true,
+      vehicles_sample: (v.entity || []).slice(0, 3).map(e => e.id),
+      trips_sample: (t.entity || []).slice(0, 3).map(e => e.id),
+    });
+  } catch (e) {
     res.status(e.status || 500).json({ error: String(e), details: e.details || null });
   }
 });
@@ -208,8 +247,8 @@ app.listen(PORT, async () => {
     await ensureStops();
     await ensureRoutes();
     console.log(`Open http://localhost:${PORT}`);
-  } catch(e){
+  } catch (e) {
     console.error('Startup error:', e);
-    console.error('If Node < 18, please update Node.');
+    console.error('If Node < 18, please update Node or keep the polyfill.');
   }
 });
