@@ -10,11 +10,23 @@ function must(sel) {
 const toRad = d => d * Math.PI / 180;
 const haversine = (a,b,c,d)=>{
   const R=6371000, dLat=toRad(c-a), dLon=toRad(d-b);
-  const A=Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
+  const A=Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(Math.abs(dLon)/2)**2;
   return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));
 };
 const fmtKm = m => m < 1000 ? `${Math.round(m)} metres` : `${(m/1000).toFixed(2)} kilometres`;
 const nowSec = () => Math.floor(Date.now()/1000);
+
+// ETA estimator for fallback (distance in m, speed in m/s)
+function estimateEtaSeconds(distanceM, speedMpsNullable) {
+  // clamp speed to realistic street ops; default ≈ 18 km/h
+  const v = Number.isFinite(speedMpsNullable) && speedMpsNullable > 0
+    ? Math.max(2.0, Math.min(10.0, speedMpsNullable)) // 7.2–36 km/h
+    : 5.0; // default 18 km/h
+  // travel time + small buffer for lights/dwell
+  const ETA = (distanceM / v) + 30;           // +30s buffer
+  const ETA_CLAMP = Math.max(30, Math.min(1200, ETA)); // 0.5–20 min
+  return Math.round(ETA_CLAMP);
+}
 
 // ---------- robust fetch ----------
 async function fetchJSON(url){
@@ -87,6 +99,7 @@ function renderArrivals(list, fallbackNote=''){
   } else {
     for (const it of list) {
       const etaMin = it.eta === null ? null : Math.max(0, Math.round(it.eta / 60));
+      const estMark = it.isEstimate ? '≈ ' : '';
       const cls = etaMin === null ? 'eta' : (etaMin <= 3 ? 'eta good' : (etaMin <= 7 ? 'eta warn' : 'eta'));
       const label = routeLabel(it.routeId);
 
@@ -94,13 +107,13 @@ function renderArrivals(list, fallbackNote=''){
       li.innerHTML = `
         <div class="row">
           <div class="${cls}">
-            ${etaMin === null ? '—' : `${etaMin} min`}
+            ${etaMin === null ? '—' : `${estMark}${etaMin} min`}
           </div>
           <span class="pill" title="${label}">${label}</span>
         </div>
         <div class="sub">
           ${it.detail
-            ? `Nearby vehicle — ${it.detail}`
+            ? `${it.detail}${it.isEstimate ? ' (est.)' : ''}`
             : `At stop #${it.stopId}`}
         </div>
       `;
@@ -128,11 +141,11 @@ async function refresh(){
 
     if (!nearest) throw new Error('App not initialized yet (no nearest stop).');
 
-    // ✅ Query ONLY the single nearest stop id
+    // Query ONLY the single nearest stop id
     const ids = [String(nearest.stop_id)];
     const { updates } = await getTrips(ids);
 
-    // ✅ Keep only updates whose stopId is geographically very close to this stop
+    // Keep only updates whose stopId is close to this stop
     const now = nowSec();
     const baseLat = (user && user.lat) || nearest.lat;
     const baseLon = (user && user.lon) || nearest.lon;
@@ -149,7 +162,8 @@ async function refresh(){
       .map(u => ({
         routeId: u.routeId,
         stopId: u.stopId,
-        eta: (u.arrival || 0) - now
+        eta: (u.arrival || 0) - now,
+        isEstimate: false
       }))
       .filter(x => x.eta > -60)
       .sort((a,b) => a.eta - b.eta)
@@ -157,7 +171,7 @@ async function refresh(){
 
     let note = '';
 
-    // Fallback to nearby vehicles if no stop-matched predictions
+    // Fallback: estimate ETAs from nearby vehicles
     if (!list.length) {
       const v = await getVehicles();
       const near = [];
@@ -167,17 +181,21 @@ async function refresh(){
         const d = haversine(baseLat, baseLon, veh.position.latitude, veh.position.longitude);
         if (d <= 400) {
           const rid = veh.trip?.routeId || veh.trip?.route_id;
+          const spd = veh.position.speed; // m/s (optional)
+          const etaSec = estimateEtaSeconds(d, spd);
           near.push({
             routeId: rid || '—',
             stopId: veh.stopId || veh.stop_id || 'nearby',
-            eta: null,
+            eta: etaSec,
+            isEstimate: true,
             detail: `${Math.round(d)} metres away`
           });
         }
       }
       if (near.length) {
-        list = near.slice(0,8);
-        note = 'Nearby vehicles within ~400 metres (fallback view).';
+        // soonest first
+        list = near.sort((a,b)=>a.eta-b.eta).slice(0,8);
+        note = 'Nearby vehicles within ~400 metres (estimated ETAs).';
       }
     }
 
@@ -229,11 +247,9 @@ function init(){
 
   const status = must('#status');
 
-  // Geolocation fallback for non-HTTPS origins (still usable)
   if (!('geolocation' in navigator)) {
     status.textContent = 'No geolocation — using fallback location.';
     must('#err').textContent = 'Enable location (HTTPS required) for exact nearest stop.';
-    // Downtown-ish fallback; change if you like
     bootstrapWithCoords(43.645, -79.380);
   } else {
     navigator.geolocation.getCurrentPosition(async pos=>{
@@ -241,7 +257,6 @@ function init(){
     }, err=>{
       status.textContent = 'Location error';
       must('#err').textContent = err.message;
-      // Still let the app run in a sensible place
       bootstrapWithCoords(43.645, -79.380);
     }, { enableHighAccuracy:true, timeout:10000 });
   }
