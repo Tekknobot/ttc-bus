@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>TTC Arrivals — Nearest Stop</title>
+  <meta name="theme-color" content="#0b57d0">
+  <style>
+    :root{
+      --bg:#0b0f14;
+      --card:#0f141b;
+      --text:#e5e7eb;
+      --muted:#94a3b8;
+      --border:#1e293b;
+      --accent:#4c8dff;
+      --good:#22c55e;
+      --warn:#d97706;
+      --ring: 0 0 0 4px rgba(76,141,255,.18);
+      --radius:18px;
+      --shadow: 0 8px 24px rgba(0,0,0,.4);
+    }
+    @media (prefers-color-scheme: light){
+      :root{
+        --bg:#f7f7fb; --card:#ffffff; --text:#111827; --muted:#6b7280; --border:#e5e7eb; --accent:#0b57d0;
+        --shadow: 0 8px 24px rgba(0,0,0,.06);
+      }
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background:var(--bg); color:var(--text);
+      -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+    }
+    .wrap{min-height:100svh; display:grid; place-items:center; padding:24px}
+    .card{
+      width:100%; max-width:560px; background:var(--card); border:1px solid var(--border);
+      border-radius:var(--radius); box-shadow:var(--shadow); overflow:clip;
+    }
+    .header{
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      padding:16px; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:2; background:inherit;
+      backdrop-filter:saturate(1.2) blur(6px);
+    }
+    .title{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.2px}
+    .badge{background:rgba(76,141,255,.12); color:var(--accent); border:1px solid rgba(76,141,255,.22);
+      padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; line-height:1.8}
+    .controls{display:flex; align-items:center; gap:8px}
+    .spin{display:none; font-size:14px}
+    button{
+      appearance:none; border:1px solid var(--border); background:var(--card); color:var(--text);
+      padding:10px 14px; border-radius:12px; font-weight:700; font-size:14px; cursor:pointer;
+      transition:transform .04s ease, box-shadow .2s ease, border-color .2s ease
+    }
+    button:hover{box-shadow:var(--shadow)} button:active{transform:translateY(1px)}
+    button:focus-visible{outline:none; box-shadow:var(--ring); border-color:var(--accent)}
+
+    /* BIG, PADDED LOCATION LINE */
+    .where{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:14px 16px;           /* more padding */
+      margin:4px 0 6px;            /* breathing room */
+      font-size:16px;              /* bigger text */
+      font-weight:600;             /* bolder */
+      line-height:1.4;
+      color:var(--text);
+      background: rgba(76,141,255,.06);
+      border-top:1px solid var(--border);
+      border-bottom:1px solid var(--border);
+      border-radius:0;
+    }
+    .where::before{ content:"📍"; opacity:.9; }
+    .where .meta{ color: var(--muted); font-weight:500 }
+    .where .dist{ font-weight:800 }
+    @media (max-width:420px){
+      .where{ font-size:17px; padding:16px }
+    }
+
+    .err{padding:0 16px 8px 16px; color:#f87171; white-space:pre-wrap; font-size:13px}
+
+    .labels{display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center;
+      padding:8px 16px; color:var(--muted); font-size:12px; border-top:1px solid var(--border)}
+    ul{list-style:none; margin:0; padding:0}
+    li{border-top:1px solid var(--border)}
+    .row{display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; padding:14px 16px}
+    .eta{font-variant-numeric:tabular-nums; font-size:22px; font-weight:800; letter-spacing:.2px}
+    .eta.good{color:var(--good)} .eta.warn{color:var(--warn)}
+    .pill{justify-self:end; border:1px solid var(--border); padding:6px 10px; border-radius:999px; font-size:12px; font-weight:800}
+    .sub{padding:0 16px 12px 16px; color:var(--muted); font-size:12px}
+    .foot{padding:12px 16px 16px 16px; color:var(--muted); font-size:12px; display:flex; justify-content:space-between; align-items:center}
+    .empty{padding:24px 16px; color:var(--muted); text-align:center; font-size:14px}
+    .help{margin:8px 16px 12px 16px; border:1px dashed var(--border); border-radius:12px; padding:10px 12px; color:var(--muted); font-size:12px}
+    .help summary{cursor:pointer; font-weight:700; color:var(--text)}
+    @media (max-width:420px){ .row{padding:12px} .eta{font-size:20px} button{padding:12px 14px} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="header">
+        <div class="title">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 16V7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v9M2 16h20v3a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-3Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M7 16V9h10v7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>Live TTC Arrivals</span>
+          <span class="badge" id="status">Live</span>
+        </div>
+        <div class="controls">
+          <span class="spin" id="spin">⏳</span>
+          <button id="btnRefresh" hidden>Refresh</button>
+        </div>
+      </div>
+
+      <div class="where" id="where"></div>
+
+      <details class="help" open>
+        <summary>What am I seeing?</summary>
+        <ul style="margin:8px 0 0 18px; line-height:1.55">
+          <li><strong>Location is required.</strong> When you allow location, the app finds the <em>nearest TTC stop</em> to where you’re standing and shows arrivals for that stop.</li>
+          <li><strong>Arrives in</strong> shows how many minutes until a vehicle reaches that stop.
+            <span style="color:var(--good);font-weight:700">Green ≤ 3</span>,
+            <span style="color:var(--warn);font-weight:700">Amber ≤ 7</span>,
+            then grey.</li>
+          <li><strong>Route</strong> is the route number serving the prediction (e.g., 29, 31, 72).</li>
+          <li><strong>Under each row</strong> you’ll see either:
+            <ul style="margin:6px 0 0 18px">
+              <li><em>“At stop #1234”</em> — the stop the prediction is for, or</li>
+              <li><em>“Nearby vehicle — 120&nbsp;metres away”</em> — shown when no predictions match; we fall back to vehicles within ~400&nbsp;metres of you.</li>
+            </ul>
+          </li>
+          <li><strong>Opposite platforms included.</strong> We also include “sibling” stops within ~120&nbsp;metres (often the opposite side of the street) so you won’t miss the other direction.</li>
+          <li><strong>Auto-refresh.</strong> The list refreshes roughly every 10&nbsp;seconds. Tap <em>Refresh</em> anytime to update immediately.</li>
+          <li><strong>Privacy.</strong> Your location stays in your browser; it’s used only to pick the nearest stop and measure distances to nearby vehicles.</li>
+          <li><strong>Troubleshooting.</strong>
+            <ul style="margin:6px 0 0 18px">
+              <li>If you see “Location error”, enable location for this site in your browser settings and reload.</li>
+              <li>If “No predictions” appears, it usually means the feed hasn’t posted times for this stop yet—try Refresh, or check again in a minute.</li>
+            </ul>
+          </li>
+        </ul>
+      </details>
+      
+      <div class="err" id="err"></div>
+
+      <div class="labels">
+        <span>Arrives in</span>
+        <span style="justify-self:end">Route</span>
+      </div>
+
+      <ul id="list"></ul>
+
+      <div class="foot">
+        <span class="status">Location-based. Works best near your stop.</span>
+        <span id="foot"></span>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
