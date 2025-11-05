@@ -48,7 +48,9 @@ async function getTrips(stopIds){
 }
 
 // ---------- state ----------
-let nearest = null, lastStamp = null, user = null;
+let pin = null;        // {lat, lon} from ONE geolocation read (or fallback)
+let nearest = null;    // chosen stop closest to the pin
+let lastStamp = null;
 
 // Lookups
 const routesById = Object.create(null);
@@ -84,7 +86,7 @@ function pickNearest(stops, lat, lon){
     const d = haversine(lat,lon,s.lat,s.lon);
     if(!best || d < best.d) best = {...s, d};
   }
-  return { best };
+  return best;
 }
 
 function renderNext(next){
@@ -110,67 +112,7 @@ function renderNext(next){
   ul.appendChild(li);
 }
 
-// ---------- debug overlay ----------
-const debug = new URLSearchParams(location.search).get('debug') === '1';
-function setDebug(text){
-  if (!debug) return;
-  let dv = document.getElementById('debug');
-  if (!dv) {
-    dv = document.createElement('div');
-    dv.id = 'debug';
-    dv.style.cssText = 'padding:8px 16px;color:#94a3b8;font-size:12px';
-    const header = document.querySelector('.header');
-    header && header.insertAdjacentElement('afterend', dv);
-  }
-  dv.textContent = text;
-}
-
-// ---------- location acquisition (mobile-robust) ----------
-const ACCURACY_GOAL_M = 80;     // aim for ≤ 80 m
-const MAX_WAIT_MS     = 15000;  // give GPS up to 15s
-const BAD_NEAREST_M   = 300;    // if nearest stop farther than this, treat as wrong fix
-
-function locationErrorHint(message){
-  const err = must('#err');
-  let hint = message || 'Location error.';
-  hint += ' If you are on iPhone, enable “Precise Location” for this site. Ensure the page is loaded over HTTPS.';
-  err.textContent = hint;
-}
-
-function getPrecisePosition(){
-  return new Promise((resolve, reject) => {
-    if (!('geolocation' in navigator)) {
-      reject(new Error('Geolocation not available (use HTTPS).'));
-      return;
-    }
-    let best = null;
-    const start = Date.now();
-
-    const onSuccess = (pos) => {
-      best = (!best || pos.coords.accuracy < best.coords.accuracy) ? pos : best;
-      const good = pos.coords.accuracy <= ACCURACY_GOAL_M;
-      if (good || (Date.now() - start) > MAX_WAIT_MS) {
-        navigator.geolocation.clearWatch(wid);
-        resolve(best || pos);
-      }
-    };
-    const onError = (e) => {
-      // Keep waiting unless fatal; if we already have a best, resolve it after timeout
-      if ((Date.now() - start) > MAX_WAIT_MS) {
-        navigator.geolocation.clearWatch(wid);
-        best ? resolve(best) : reject(e);
-      }
-    };
-
-    const wid = navigator.geolocation.watchPosition(onSuccess, onError, {
-      enableHighAccuracy: true,
-      maximumAge: 0,
-      timeout: MAX_WAIT_MS
-    });
-  });
-}
-
-// ---------- refresh (single nearest stop only) ----------
+// ---------- refresh (query only the chosen stop near the pin) ----------
 async function refresh(){
   const spin   = must('#spin');
   const status = must('#status');
@@ -185,13 +127,9 @@ async function refresh(){
     if (!nearest) throw new Error('App not initialized yet (no nearest stop).');
 
     const stopIdStr = String(nearest.stop_id);
-
-    // Query ONLY the single nearest stop id
     const { updates } = await getTrips([stopIdStr]);
 
     const now = nowSec();
-
-    // Build candidates strictly for THIS stop_id (no siblings)
     const candidates = (updates || [])
       .filter(u => String(u.stopId) === stopIdStr)
       .map(u => {
@@ -210,13 +148,6 @@ async function refresh(){
     renderNext(next);
     lastStamp = new Date();
     foot.textContent = `Last updated ${lastStamp.toLocaleTimeString()}`;
-
-    // Debug info
-    setDebug(
-      `lat=${(user?.lat||nearest.lat).toFixed(5)}, lon=${(user?.lon||nearest.lon).toFixed(5)}, ` +
-      `accuracy≈${Math.round(user?.accuracy||0)}m, stop=${nearest?.stop_id}, dist=${Math.round(nearest?.d||0)}m, skew=${Math.round(_clockSkewMs)}ms`
-    );
-
     must('#btnRefresh').hidden = false;
   } catch(e){
     err.textContent = e.message;
@@ -226,45 +157,28 @@ async function refresh(){
   }
 }
 
-// ---------- boot helpers ----------
-async function bootstrapWithCoords(lat, lon) {
+// ---------- boot (use geolocation ONCE to set the pin, then stick to that stop) ----------
+async function bootstrapWithPin(lat, lon) {
   const status = must('#status');
   const where  = must('#where');
   const err    = must('#err');
 
   try {
-    user = user || {};
-    user.lat = lat;
-    user.lon = lon;
+    pin = { lat, lon };
 
-    // sync time once per boot (fixes device clock differences)
     if (_clockSkewMs === 0) await syncServerTime();
 
     const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
     buildRouteIndexes(routes);
     if (!stopsById[stops?.[0]?.stop_id ?? '']) buildStopIndex(stops);
 
-    const pick = pickNearest(stops, user.lat, user.lon);
-    nearest = pick.best;
+    nearest = pickNearest(stops, pin.lat, pin.lon);
 
     where.innerHTML = `
       <span>${nearest.name}</span>
       <span class="meta">(#${nearest.stop_id}) ·</span>
       <span class="dist">${fmtKm(nearest.d)} away</span>
     `;
-
-    // If the "nearest" stop is far (>300 m), don't trust this fix; warn and let GPS refine
-    if (nearest.d > BAD_NEAREST_M) {
-      locationErrorHint('Your location looks too imprecise to choose the right stop.');
-      setDebug(
-        `lat=${user.lat.toFixed(5)}, lon=${user.lon.toFixed(5)}, accuracy≈${Math.round(user.accuracy||0)}m, ` +
-        `nearestDist=${Math.round(nearest.d)}m (too far)`
-      );
-      return; // wait for a better position (init() keeps watching)
-    } else {
-      // clear any prior warning
-      if (err.textContent.includes('imprecise') || err.textContent.includes('Precise Location')) err.textContent = '';
-    }
 
     await refresh();
   } catch (e) {
@@ -273,42 +187,30 @@ async function bootstrapWithCoords(lat, lon) {
   }
 }
 
-// ---------- init (runs after DOM because of `defer`) ----------
-async function init(){
+// ---------- init ----------
+function init(){
   ['#status','#err','#spin','#where','#list','#foot','#btnRefresh'].forEach(must);
 
   const status = must('#status');
 
-  if (!('geolocation' in navigator)) {
-    status.textContent = 'No geolocation — using fallback location.';
-    must('#err').textContent = 'Enable location (HTTPS required) for exact nearest stop.';
-    // Minimal safe fallback (downtown). We deliberately DO NOT auto-show arrivals from a far stop.
-    user = { lat: 43.645, lon: -79.380, accuracy: 9999 };
-    setDebug('No geolocation; using fallback coords.');
-    return;
-  }
-
-  // Actively hunt for a precise fix; update UI as the fix improves
-  try {
-    const pos = await getPrecisePosition();
-    user = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy };
-    await bootstrapWithCoords(user.lat, user.lon);
-
-    // Keep refining for a short while in case first fix was coarse
-    const refineStart = Date.now();
-    const wid = navigator.geolocation.watchPosition(async p => {
-      user = { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy };
-      await bootstrapWithCoords(user.lat, user.lon);
-      // Stop refining if we’ve hit the accuracy goal or after a short window
-      if (p.coords.accuracy <= ACCURACY_GOAL_M || (Date.now() - refineStart) > 20000) {
-        navigator.geolocation.clearWatch(wid);
-        // Start periodic prediction refresh (location fixed enough now)
-        setInterval(refresh, 10000);
-      }
-    }, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
-  } catch (e) {
-    status.textContent = 'Location error';
-    locationErrorHint(e.message);
+  // Geolocation ONLY to place the pin once; afterwards we never use device location again
+  if ('geolocation' in navigator) {
+    navigator.geolocation.getCurrentPosition(async pos=>{
+      await bootstrapWithPin(pos.coords.latitude, pos.coords.longitude);
+      // prediction refresh only; location is fixed to the pin's nearest stop
+      setInterval(refresh, 10000);
+    }, async _err=>{
+      status.textContent = 'Using fallback pin';
+      must('#err').textContent = 'Location unavailable; using a central fallback. Allow location for a more accurate pin.';
+      // Downtown fallback pin
+      await bootstrapWithPin(43.645, -79.380);
+      setInterval(refresh, 10000);
+    }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+  } else {
+    status.textContent = 'No geolocation — using fallback pin.';
+    must('#err').textContent = 'Enable location (HTTPS required) to place the pin near you.';
+    bootstrapWithPin(43.645, -79.380);
+    setInterval(refresh, 10000);
   }
 
   must('#btnRefresh').addEventListener('click', refresh);
