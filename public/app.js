@@ -159,6 +159,15 @@ function setStopAndRefresh(newStopId) {
   tick();        // refresh arrivals now
 }
 
+// Case-insensitive route match against either short_name or route_id
+function routeMatches(routePinned, item) {
+  if (!routePinned) return true;
+  const q = String(routePinned).trim().toLowerCase();
+  const a = (item.route_short_name ?? "").toString().toLowerCase();
+  const b = (item.route_id ?? "").toString().toLowerCase();
+  return a === q || b === q;
+}
+
 // ======= Render =======
 function renderWhere() {
   // Stack: Stop (bold), Street, Nearest — plus sibling switcher (when available)
