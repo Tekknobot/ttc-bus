@@ -5,6 +5,12 @@ function must(sel) {
   if (!el) throw new Error(`Missing DOM element: ${sel}`);
   return el;
 }
+function el(tag, attrs={}, html='') {
+  const x = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) x.setAttribute(k, v);
+  if (html) x.innerHTML = html;
+  return x;
+}
 
 // ---------- geo / math ----------
 const toRad = d => d * Math.PI / 180;
@@ -48,8 +54,9 @@ async function getTrips(stopIds){
 }
 
 // ---------- state ----------
-let pin = null;        // {lat, lon} from ONE geolocation read (or fallback)
-let nearest = null;    // chosen stop closest to the pin
+let pin = null;             // {lat, lon} from a single geo read or fallback
+let nearest = null;         // chosen stop (can be user-selected)
+let allStops = [];          // full stop list
 let lastStamp = null;
 
 // Lookups
@@ -57,6 +64,11 @@ const routesById = Object.create(null);
 const routesByShort = Object.create(null);
 const stopsById = Object.create(null);
 
+const LOCAL_KEY = 'ttcChosenStopId';
+const SUSPICIOUS_M = 300;          // if pin→stop distance > this, prompt chooser
+const NEARBY_LIST_RADIUS_M = 2000; // show stops within 2km in chooser (fallback to top-N if none)
+
+// ---------- build indexes ----------
 function buildRouteIndexes(routes) {
   for (const r of routes || []) {
     if (r.route_id != null) routesById[String(r.route_id)] = r;
@@ -79,7 +91,6 @@ function routeLabel(routeId) {
   return r.short_name || r.long_name || key;
 }
 
-// ---------- logic ----------
 function pickNearest(stops, lat, lon){
   let best=null;
   for(const s of stops){
@@ -89,9 +100,18 @@ function pickNearest(stops, lat, lon){
   return best;
 }
 
+// ---------- UI: render ----------
 function renderNext(next){
   const ul = must('#list');
   ul.innerHTML = '';
+
+  const whereBar = must('#where');
+  const changeBtn = `<button id="btnChangeStop" style="margin-left:8px;padding:4px 8px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Not my stop?</button>`;
+  // add change button only once
+  if (!document.getElementById('btnChangeStop')) {
+    whereBar.insertAdjacentHTML('beforeend', changeBtn);
+    document.getElementById('btnChangeStop').addEventListener('click', openChooser);
+  }
 
   if (!next) {
     ul.innerHTML = `<li class="empty">No live prediction for this stop right now.</li>`;
@@ -112,7 +132,108 @@ function renderNext(next){
   ul.appendChild(li);
 }
 
-// ---------- refresh (query only the chosen stop near the pin) ----------
+// ---------- chooser overlay ----------
+function ensureChooserDOM(){
+  if (document.getElementById('chooser')) return;
+  const wrap = el('div', { id: 'chooser', style: `
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); display:none; z-index: 50;
+  `});
+  const sheet = el('div', { style: `
+    position:absolute; left:50%; top:10%; transform:translateX(-50%);
+    width:min(560px, 92vw); max-height: 80vh; overflow:auto;
+    background: var(--card); border:1px solid var(--border); border-radius:16px; box-shadow: var(--shadow);
+  `});
+  sheet.innerHTML = `
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border)">
+      <div style="font-weight:800">Choose your stop</div>
+      <button id="chClose" style="padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Close</button>
+    </div>
+    <div style="padding:10px 14px; display:flex; gap:8px; align-items:center">
+      <input id="chSearch" placeholder="Search by name or #id" style="flex:1;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text)"/>
+      <span id="chMeta" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <ul id="chList" style="list-style:none;margin:0;padding:0"></ul>
+  `;
+  wrap.appendChild(sheet);
+  document.body.appendChild(wrap);
+
+  document.getElementById('chClose').onclick = closeChooser;
+  document.getElementById('chSearch').oninput = () => populateChooser();
+}
+function openChooser(){
+  ensureChooserDOM();
+  populateChooser();
+  const wrap = document.getElementById('chooser');
+  wrap.style.display = 'block';
+}
+function closeChooser(){
+  const wrap = document.getElementById('chooser');
+  if (wrap) wrap.style.display = 'none';
+}
+function populateChooser(){
+  const list = document.getElementById('chList');
+  const meta = document.getElementById('chMeta');
+  const q = (document.getElementById('chSearch').value || '').trim().toLowerCase();
+
+  // compute distances from pin if we have it
+  const withDist = allStops.map(s => ({
+    ...s,
+    d: pin ? haversine(pin.lat, pin.lon, s.lat, s.lon) : Infinity
+  }));
+
+  let items;
+  if (q) {
+    items = withDist.filter(s =>
+      (s.name||'').toLowerCase().includes(q) ||
+      String(s.stop_id).includes(q) ||
+      String(s.stop_code||'').includes(q)
+    ).sort((a,b)=>a.d - b.d).slice(0, 50);
+  } else {
+    // default: closest within radius, else just top-N closest
+    const near = withDist.filter(s => s.d <= NEARBY_LIST_RADIUS_M).sort((a,b)=>a.d - b.d);
+    items = (near.length ? near : withDist.sort((a,b)=>a.d - b.d)).slice(0, 50);
+  }
+
+  meta.textContent = pin ? `from pin • ${items.length} shown` : `${items.length} shown`;
+
+  list.innerHTML = '';
+  for (const s of items) {
+    const li = el('li', { style: 'border-top:1px solid var(--border)' }, `
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:12px 14px">
+        <div>
+          <div style="font-weight:800">${s.name}</div>
+          <div style="color:var(--muted);font-size:12px">#${s.stop_id}${s.stop_code?` · code ${s.stop_code}`:''}</div>
+        </div>
+        <div style="font-size:12px;color:var(--muted)">${Number.isFinite(s.d) ? fmtKm(s.d) : ''}</div>
+      </div>
+    `);
+    li.style.cursor = 'pointer';
+    li.onclick = async () => {
+      nearest = s;
+      localStorage.setItem(LOCAL_KEY, String(s.stop_id));
+      updateWhereBar();
+      closeChooser();
+      await refresh();
+    };
+    list.appendChild(li);
+  }
+}
+
+// ---------- UI helpers ----------
+function updateWhereBar(){
+  const where = must('#where');
+  where.innerHTML = `
+    <span>${nearest.name}</span>
+    <span class="meta">(#${nearest.stop_id}) ·</span>
+    ${
+      pin
+        ? `<span class="dist">${fmtKm(haversine(pin.lat, pin.lon, nearest.lat, nearest.lon))} from pin</span>`
+        : ''
+    }
+  `;
+}
+
+// ---------- refresh (query only the chosen stop) ----------
 async function refresh(){
   const spin   = must('#spin');
   const status = must('#status');
@@ -124,7 +245,7 @@ async function refresh(){
     status.textContent = 'Updating…';
     err.textContent = '';
 
-    if (!nearest) throw new Error('App not initialized yet (no nearest stop).');
+    if (!nearest) throw new Error('Pick a stop to see arrivals.');
 
     const stopIdStr = String(nearest.stop_id);
     const { updates } = await getTrips([stopIdStr]);
@@ -134,11 +255,7 @@ async function refresh(){
       .filter(u => String(u.stopId) === stopIdStr)
       .map(u => {
         const epoch = (u.arrival ?? null) || (u.departure ?? null) || null;
-        return epoch ? {
-          routeId: u.routeId,
-          stopId: u.stopId,
-          eta: epoch - now
-        } : null;
+        return epoch ? { routeId: u.routeId, stopId: u.stopId, eta: epoch - now } : null;
       })
       .filter(Boolean)
       .filter(x => x.eta > -30);
@@ -148,6 +265,15 @@ async function refresh(){
     renderNext(next);
     lastStamp = new Date();
     foot.textContent = `Last updated ${lastStamp.toLocaleTimeString()}`;
+
+    // If we have no prediction often, offer stop chooser quickly
+    if (!next && !document.getElementById('btnChangeStop')) {
+      const whereBar = must('#where');
+      const changeBtn = `<button id="btnChangeStop" style="margin-left:8px;padding:4px 8px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:700;cursor:pointer">Choose nearby stop</button>`;
+      whereBar.insertAdjacentHTML('beforeend', changeBtn);
+      document.getElementById('btnChangeStop').addEventListener('click', openChooser);
+    }
+
     must('#btnRefresh').hidden = false;
   } catch(e){
     err.textContent = e.message;
@@ -157,30 +283,59 @@ async function refresh(){
   }
 }
 
-// ---------- boot (use geolocation ONCE to set the pin, then stick to that stop) ----------
-async function bootstrapWithPin(lat, lon) {
+// ---------- boot (geolocate once for the pin, then let user confirm/override) ----------
+async function bootstrap(){
   const status = must('#status');
-  const where  = must('#where');
   const err    = must('#err');
 
   try {
-    pin = { lat, lon };
-
     if (_clockSkewMs === 0) await syncServerTime();
 
     const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
+    allStops = stops || [];
     buildRouteIndexes(routes);
-    if (!stopsById[stops?.[0]?.stop_id ?? '']) buildStopIndex(stops);
+    buildStopIndex(allStops);
 
-    nearest = pickNearest(stops, pin.lat, pin.lon);
+    // 1) If user has a saved stop, use it immediately
+    const saved = localStorage.getItem(LOCAL_KEY);
+    if (saved && stopsById[saved]) {
+      nearest = stopsById[saved];
+      updateWhereBar();
+      await refresh();
+      setInterval(refresh, 10000);
+      return;
+    }
 
-    where.innerHTML = `
-      <span>${nearest.name}</span>
-      <span class="meta">(#${nearest.stop_id}) ·</span>
-      <span class="dist">${fmtKm(nearest.d)} away</span>
-    `;
+    // 2) Otherwise, try one-shot geolocation JUST to place the pin
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(async pos=>{
+        pin = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        nearest = pickNearest(allStops, pin.lat, pin.lon);
+        updateWhereBar();
 
-    await refresh();
+        // If this looks suspicious (>300 m), prompt the chooser
+        const d = haversine(pin.lat, pin.lon, nearest.lat, nearest.lon);
+        if (d > SUSPICIOUS_M) {
+          err.textContent = 'Your first location fix looked approximate. Pick your stop below.';
+          openChooser();
+        }
+
+        await refresh();
+        setInterval(refresh, 10000);
+      }, async _err=>{
+        // 3) Fallback pin (no geolocation)
+        err.textContent = 'Location unavailable; search and pick your stop.';
+        pin = null;
+        openChooser();
+        // still start a refresh loop; it will say "Pick a stop" until the user chooses
+        setInterval(refresh, 10000);
+      }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+    } else {
+      err.textContent = 'No geolocation; search and pick your stop.';
+      pin = null;
+      openChooser();
+      setInterval(refresh, 10000);
+    }
   } catch (e) {
     status.textContent = 'Startup error';
     err.textContent = e.message || String(e);
@@ -190,30 +345,9 @@ async function bootstrapWithPin(lat, lon) {
 // ---------- init ----------
 function init(){
   ['#status','#err','#spin','#where','#list','#foot','#btnRefresh'].forEach(must);
-
-  const status = must('#status');
-
-  // Geolocation ONLY to place the pin once; afterwards we never use device location again
-  if ('geolocation' in navigator) {
-    navigator.geolocation.getCurrentPosition(async pos=>{
-      await bootstrapWithPin(pos.coords.latitude, pos.coords.longitude);
-      // prediction refresh only; location is fixed to the pin's nearest stop
-      setInterval(refresh, 10000);
-    }, async _err=>{
-      status.textContent = 'Using fallback pin';
-      must('#err').textContent = 'Location unavailable; using a central fallback. Allow location for a more accurate pin.';
-      // Downtown fallback pin
-      await bootstrapWithPin(43.645, -79.380);
-      setInterval(refresh, 10000);
-    }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
-  } else {
-    status.textContent = 'No geolocation — using fallback pin.';
-    must('#err').textContent = 'Enable location (HTTPS required) to place the pin near you.';
-    bootstrapWithPin(43.645, -79.380);
-    setInterval(refresh, 10000);
-  }
-
+  ensureChooserDOM();
   must('#btnRefresh').addEventListener('click', refresh);
+  bootstrap();
 }
 
-init(); // script is loaded with defer
+init();
