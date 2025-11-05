@@ -59,24 +59,25 @@
       <details class="help">
         <summary>What am I seeing?</summary>
         <ul style="margin:8px 0 0 18px; line-height:1.55">
-          <li><strong>Location is required.</strong> Allow location (or pass <code>?pin=LAT,LON</code>) so the app can pick the nearest TTC stop and show arrivals for that stop.</li>
+          <li><strong>Location is required.</strong> Allow location or pass <code>?pin=LAT,LON</code> so the app can find your nearest TTC stop and display live arrivals for that stop.</li>
           <li><strong>Arrives in</strong> shows minutes until a vehicle reaches that stop.
-            <span style="color:var(--good);font-weight:700">Green ≤ 3</span>,
-            <span style="color:var(--warn);font-weight:700">Amber ≤ 7</span>, then grey.
+            <span style="color:var(--good);font-weight:700">Green ≤ 3 min</span>,
+            <span style="color:var(--warn);font-weight:700">Amber ≤ 7 min</span>, then grey.
           </li>
-          <li><strong>No route numbers shown.</strong> Each row focuses on the destination (headsign) and a second line that highlights the location:
+          <li><strong>No route numbers displayed.</strong> Each row shows only the destination or headsign, and a second line highlighting the location:
             <ul style="margin:6px 0 0 18px">
-              <li><em>At stop #1234 — Dundas St West</em> (the prediction’s stop and primary street), or</li>
-              <li><em>Nearby vehicle — 120 metres away</em> when no predictions match; this is a proximity fallback within ~400 metres.</li>
+              <li><em>At stop #1234 — Dundas St West</em> → the stop and street the prediction applies to, or</li>
+              <li><em>Nearby vehicle — 120 metres away</em> → a fallback when no stop predictions match (within ~400 m).</li>
             </ul>
           </li>
-          <li><strong>Opposite platforms included.</strong> Sibling stops within about 120 metres are included (usually the opposite side).</li>
-          <li><strong>Auto refresh.</strong> The list updates roughly every 10 seconds. Tap <em>Refresh</em> to update immediately.</li>
-          <li><strong>Optional route filtering.</strong> You can filter results with <code>?route=NUMBER</code> (e.g., <code>?route=72</code>), but the route isn’t displayed in the UI.</li>
-          <li><strong>Privacy.</strong> Your location stays in your browser. It’s only used to choose the nearest stop and measure distances.</li>
+          <li><strong>Stacked location info.</strong> The header shows Stop → Street → Nearest distance on separate lines to avoid wrapping or clipping.</li>
+          <li><strong>Opposite platforms included.</strong> Sibling stops within ≈ 120 m are combined, usually covering the opposite side of the street.</li>
+          <li><strong>Auto-refresh.</strong> Data refreshes about every 10 seconds; use the <em>Refresh</em> button for an instant update.</li>
+          <li><strong>Optional filtering.</strong> You can still use <code>?stop=ID</code> or <code>?route=NUMBER</code> to focus results, though routes aren’t shown visually.</li>
+          <li><strong>Privacy.</strong> Your location never leaves your browser—it’s used only to find nearby stops and measure distances.</li>
         </ul>
       </details>
-
+      
       <div class="err" id="err"></div>
 
       <div class="labels">
