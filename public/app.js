@@ -13,7 +13,6 @@ const haversine = (a,b,c,d)=>{
   const A=Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
   return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));
 };
-// Use “metres / kilometres”
 const fmtKm = m => m < 1000 ? `${Math.round(m)} metres` : `${(m/1000).toFixed(2)} kilometres`;
 const nowSec = () => Math.floor(Date.now()/1000);
 
@@ -187,14 +186,12 @@ function init(){
   navigator.geolocation.getCurrentPosition(async pos=>{
     user = { lat: pos.coords.latitude, lon: pos.coords.longitude };
 
-    // Fetch data needed up front: stops and routes
     const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
     buildRouteIndexes(routes);
 
     const pick = pickNearest(stops, user.lat, user.lon);
     nearest = pick.best; siblings = pick.sibs;
 
-    // BIG, padded location line content
     where.innerHTML = `
       <span>${nearest.name}</span>
       <span class="meta">(#${nearest.stop_id}) ·</span>
@@ -211,5 +208,4 @@ function init(){
   must('#btnRefresh').addEventListener('click', refresh);
 }
 
-// Because the script is loaded with `defer`, DOM is ready here:
-init();
+init(); // script is loaded with defer

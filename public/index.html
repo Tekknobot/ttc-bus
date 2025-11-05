@@ -6,95 +6,34 @@
   <title>TTC Arrivals — Nearest Stop</title>
   <meta name="theme-color" content="#0b57d0">
   <style>
-    :root{
-      --bg:#0b0f14;
-      --card:#0f141b;
-      --text:#e5e7eb;
-      --muted:#94a3b8;
-      --border:#1e293b;
-      --accent:#4c8dff;
-      --good:#22c55e;
-      --warn:#d97706;
-      --ring: 0 0 0 4px rgba(76,141,255,.18);
-      --radius:18px;
-      --shadow: 0 8px 24px rgba(0,0,0,.4);
-    }
-    @media (prefers-color-scheme: light){
-      :root{
-        --bg:#f7f7fb; --card:#ffffff; --text:#111827; --muted:#6b7280; --border:#e5e7eb; --accent:#0b57d0;
-        --shadow: 0 8px 24px rgba(0,0,0,.06);
-      }
-    }
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{
-      margin:0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
-      background:var(--bg); color:var(--text);
-      -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
-    }
-    .wrap{min-height:100svh; display:grid; place-items:center; padding:24px}
-    .card{
-      width:100%; max-width:560px; background:var(--card); border:1px solid var(--border);
-      border-radius:var(--radius); box-shadow:var(--shadow); overflow:clip;
-    }
-    .header{
-      display:flex; align-items:center; justify-content:space-between; gap:12px;
-      padding:16px; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:2; background:inherit;
-      backdrop-filter:saturate(1.2) blur(6px);
-    }
-    .title{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.2px}
-    .badge{background:rgba(76,141,255,.12); color:var(--accent); border:1px solid rgba(76,141,255,.22);
-      padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; line-height:1.8}
-    .controls{display:flex; align-items:center; gap:8px}
-    .spin{display:none; font-size:14px}
-    button{
-      appearance:none; border:1px solid var(--border); background:var(--card); color:var(--text);
-      padding:10px 14px; border-radius:12px; font-weight:700; font-size:14px; cursor:pointer;
-      transition:transform .04s ease, box-shadow .2s ease, border-color .2s ease
-    }
-    button:hover{box-shadow:var(--shadow)} button:active{transform:translateY(1px)}
-    button:focus-visible{outline:none; box-shadow:var(--ring); border-color:var(--accent)}
-
-    /* BIG, PADDED LOCATION LINE */
-    .where{
-      display:flex;
-      align-items:center;
-      gap:10px;
-      padding:14px 16px;
-      margin:4px 0 6px;
-      font-size:16px;
-      font-weight:600;
-      line-height:1.4;
-      color:var(--text);
-      background: rgba(76,141,255,.06);
-      border-top:1px solid var(--border);
-      border-bottom:1px solid var(--border);
-      border-radius:0;
-    }
-    .where::before{ content:"📍"; opacity:.9; }
-    .where .meta{ color: var(--muted); font-weight:500 }
-    .where .dist{ font-weight:800 }
-    @media (max-width:420px){
-      .where{ font-size:17px; padding:16px }
-    }
-
-    .err{padding:0 16px 8px 16px; color:#f87171; white-space:pre-wrap; font-size:13px}
-
-    .labels{display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center;
-      padding:8px 16px; color:var(--muted); font-size:12px; border-top:1px solid var(--border)}
-    ul{list-style:none; margin:0; padding:0}
-    li{border-top:1px solid var(--border)}
-    .row{display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; padding:14px 16px}
-    .eta{font-variant-numeric:tabular-nums; font-size:22px; font-weight:800; letter-spacing:.2px}
-    .eta.good{color:var(--good)} .eta.warn{color:var(--warn)}
-    .pill{justify-self:end; border:1px solid var(--border); padding:6px 10px; border-radius:999px; font-size:12px; font-weight:800}
-    .sub{padding:0 16px 12px 16px; color:var(--muted); font-size:12px}
-    .foot{padding:12px 16px 16px 16px; color:var(--muted); font-size:12px; display:flex; justify-content:space-between; align-items:center}
-    .empty{padding:24px 16px; color:var(--muted); text-align:center; font-size:14px}
-    .help{margin:8px 16px 12px 16px; border:1px dashed var(--border); border-radius:12px; padding:10px 12px; color:var(--muted); font-size:12px}
-    .help summary{cursor:pointer; font-weight:700; color:var(--text)}
-    @media (max-width:420px){ .row{padding:12px} .eta{font-size:20px} button{padding:12px 14px} }
+    :root{--bg:#0b0f14;--card:#0f141b;--text:#e5e7eb;--muted:#94a3b8;--border:#1e293b;--accent:#4c8dff;--good:#22c55e;--warn:#d97706;--ring:0 0 0 4px rgba(76,141,255,.18);--radius:18px;--shadow:0 8px 24px rgba(0,0,0,.4)}
+    @media (prefers-color-scheme: light){:root{--bg:#f7f7fb;--card:#ffffff;--text:#111827;--muted:#6b7280;--border:#e5e7eb;--accent:#0b57d0;--shadow:0 8px 24px rgba(0,0,0,.06)}}
+    *{box-sizing:border-box}html,body{height:100%}
+    body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+    .wrap{min-height:100svh;display:grid;place-items:center;padding:24px}
+    .card{width:100%;max-width:560px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:clip}
+    .header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2;background:inherit;backdrop-filter:saturate(1.2) blur(6px)}
+    .title{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px}
+    .badge{background:rgba(76,141,255,.12);color:var(--accent);border:1px solid rgba(76,141,255,.22);padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;line-height:1.8}
+    .controls{display:flex;align-items:center;gap:8px}
+    .spin{display:none;font-size:14px}
+    button{appearance:none;border:1px solid var(--border);background:var(--card);color:var(--text);padding:10px 14px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;transition:transform .04s ease,box-shadow .2s ease,border-color .2s ease}
+    button:hover{box-shadow:var(--shadow)}button:active{transform:translateY(1px)}button:focus-visible{outline:none;box-shadow:var(--ring);border-color:var(--accent)}
+    .where{display:flex;align-items:center;gap:10px;padding:14px 16px;margin:4px 0 6px;font-size:16px;font-weight:600;line-height:1.4;color:var(--text);background:rgba(76,141,255,.06);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+    .where::before{content:"📍";opacity:.9}.where .meta{color:var(--muted);font-weight:500}.where .dist{font-weight:800}
+    @media (max-width:420px){.where{font-size:17px;padding:16px}}
+    .err{padding:0 16px 8px 16px;color:#f87171;white-space:pre-wrap;font-size:13px}
+    .labels{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:8px 16px;color:var(--muted);font-size:12px;border-top:1px solid var(--border)}
+    ul{list-style:none;margin:0;padding:0}li{border-top:1px solid var(--border)}
+    .row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:14px 16px}
+    .eta{font-variant-numeric:tabular-nums;font-size:22px;font-weight:800;letter-spacing:.2px}.eta.good{color:var(--good)}.eta.warn{color:var(--warn)}
+    .pill{justify-self:end;border:1px solid var(--border);padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800}
+    .sub{padding:0 16px 12px 16px;color:var(--muted);font-size:12px}
+    .foot{padding:12px 16px 16px 16px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;align-items:center}
+    .empty{padding:24px 16px;color:var(--muted);text-align:center;font-size:14px}
+    .help{margin:8px 16px 12px 16px;border:1px dashed var(--border);border-radius:12px;padding:10px 12px;color:var(--muted);font-size:12px}
+    .help summary{cursor:pointer;font-weight:700;color:var(--text)}
+    @media (max-width:420px){.row{padding:12px}.eta{font-size:20px}button{padding:12px 14px}}
   </style>
 </head>
 <body>
@@ -117,12 +56,11 @@
 
       <div class="where" id="where"></div>
 
-      <!-- Start closed: remove 'open' -->
       <details class="help">
         <summary>What am I seeing?</summary>
         <ul style="margin:8px 0 0 18px; line-height:1.55">
-          <li><strong>Location is required.</strong> When you allow location, the app finds the nearest TTC stop to where you are and shows arrivals for that stop.</li>
-          <li><strong>Arrives in</strong> shows how many minutes until a vehicle reaches that stop. <span style="color:var(--good);font-weight:700">Green ≤ 3</span>, <span style="color:var(--warn);font-weight:700">Amber ≤ 7</span>, then grey.</li>
+          <li><strong>Location is required.</strong> Allow location so the app can pick the nearest TTC stop and show arrivals for that stop.</li>
+          <li><strong>Arrives in</strong> shows minutes until a vehicle reaches that stop. <span style="color:var(--good);font-weight:700">Green ≤ 3</span>, <span style="color:var(--warn);font-weight:700">Amber ≤ 7</span>, then grey.</li>
           <li><strong>Route</strong> shows the route number and name, for example 47 Lansdowne.</li>
           <li><strong>Under each row</strong> you will see either:
             <ul style="margin:6px 0 0 18px">

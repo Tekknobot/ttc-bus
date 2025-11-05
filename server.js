@@ -13,7 +13,6 @@ const STOPS_PATH = path.join(ROOT, 'stops.json');
 const ROUTES_PATH = path.join(ROOT, 'routes.json');
 const PROTO_PATH = path.join(ROOT, 'gtfs-realtime.proto');
 
-// Keep the GTFS zip in tmp so both stops and routes can be parsed
 const TMP_GTFS_ZIP = path.join(os.tmpdir(), 'ttc_gtfs.zip');
 const GTFS_ZIP_URL =
   'https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/7795b45e-e65a-4465-81fc-c36b9dfff169/resource/cfb6b2b8-6191-41e3-bda1-b175c51148cb/download/TTC%20Routes%20and%20Schedules%20Data.zip';
@@ -47,7 +46,7 @@ async function fetchBufferOrDie(url) {
   return Buffer.from(await r.arrayBuffer());
 }
 
-// Very small CSV reader that handles quoted commas
+// CSV that handles quoted commas and escaped quotes
 function parseCsv(text) {
   const lines = text.split(/\r?\n/);
   const out = [];
@@ -58,13 +57,10 @@ function parseCsv(text) {
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
       if (ch === '"') {
-        // handle escaped quotes ("")
         if (inQ && line[i+1] === '"') { cur += '"'; i++; continue; }
-        inQ = !inQ;
-        continue;
+        inQ = !inQ; continue;
       }
-      if (ch === ',' && !inQ) { row.push(cur); cur = ''; }
-      else { cur += ch; }
+      if (ch === ',' && !inQ) { row.push(cur); cur=''; } else { cur += ch; }
     }
     row.push(cur);
     out.push(row);
@@ -163,7 +159,6 @@ app.get('/api/routes', async (_req,res)=>{
 
 const BASE = 'https://bustime.ttc.ca/gtfsrt';
 
-/** Trip updates — supports multiple stop IDs (comma-separated) */
 app.get('/api/trip-updates', async (req,res)=>{
   res.setHeader('Content-Type','application/json');
   try {
@@ -190,7 +185,6 @@ app.get('/api/trip-updates', async (req,res)=>{
   }
 });
 
-/** Vehicle positions — used as a fallback when TripUpdates omit stop_id */
 app.get('/api/vehicles', async (_req,res)=>{
   res.setHeader('Content-Type','application/json');
   try {
@@ -202,8 +196,6 @@ app.get('/api/vehicles', async (_req,res)=>{
 });
 
 app.use(express.static(PUBLIC_DIR));
-
-// Default route to your SPA/homepage
 app.get('*', (_req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
   if (fs.existsSync(indexPath)) res.sendFile(indexPath);
