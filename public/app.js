@@ -49,17 +49,15 @@ const getRoutes =()=>fetchJSON('/api/routes');
 const getTrips  =ids=>fetchJSON('/api/trip-updates?stop='+encodeURIComponent(ids.join(',')));
 
 // ---------- state ----------
-let pin=null, nearest=null, siblings=[], allStops=[], lastStamp=null;
-const routesById=Object.create(null), routesByShort=Object.create(null), stopsById=Object.create(null);
+let pin=null, nearest=null, allStops=[], lastStamp=null;
+const routesById=Object.create(null), stopsById=Object.create(null);
 const LOCAL_KEY='ttcChosenStopId';
-const SIBLING_RADIUS_M=120;
-const SUSPICIOUS_M=300;
+const SUSPICIOUS_M=300; // prompt chooser if pin->stop is farther than this
 
 // ---------- index builders ----------
 function buildRouteIndexes(routes){
   for(const r of routes||[]){
-    if(r.route_id) routesById[String(r.route_id)]=r;
-    if(r.short_name) routesByShort[String(r.short_name)]=r;
+    if(r.route_id != null) routesById[String(r.route_id)]=r;
   }
 }
 function buildStopIndex(stops){
@@ -67,21 +65,21 @@ function buildStopIndex(stops){
 }
 
 // ---------- helpers ----------
-function routeLabel(id){
-  if(!id) return 'Route';
-  const k=String(id); const r=routesById[k]||routesByShort[k];
-  if(!r) return k;
-  if(r.short_name&&r.long_name) return `${r.short_name} ${r.long_name}`;
-  return r.short_name||r.long_name||k;
+function routeLabel(routeId){
+  // IMPORTANT: only resolve by route_id to avoid mislabeling as some other line's short_name.
+  const r = routeId != null ? routesById[String(routeId)] : null;
+  if(!r) return String(routeId ?? 'Route');
+  if(r.short_name && r.long_name) return `${r.short_name} ${r.long_name}`;
+  return r.short_name || r.long_name || String(routeId);
 }
+
 function pickNearest(stops,lat,lon){
   let best=null;
   for(const s of stops){
     const d=haversine(lat,lon,s.lat,s.lon);
     if(!best||d<best.d) best={...s,d};
   }
-  const sibs=stops.filter(s=>haversine(best.lat,best.lon,s.lat,s.lon)<=SIBLING_RADIUS_M&&s.stop_id!==best.stop_id);
-  return {best,sibs};
+  return best;
 }
 
 // ---------- UI ----------
@@ -159,13 +157,23 @@ async function refresh(){
   try{
     spin.style.display='inline-block';status.textContent='Updating…';err.textContent='';
     if(!nearest) throw new Error('Pick a stop first.');
-    const ids=[String(nearest.stop_id),...siblings.map(s=>String(s.stop_id))];
-    const {updates}=await getTrips(ids);
+
+    // STRICT: query ONLY the pinned stop id (no siblings)
+    const stopIdStr = String(nearest.stop_id);
+    const {updates}=await getTrips([stopIdStr]);
+
     const now=nowSec();
     const list=(updates||[])
-      .filter(u=>ids.includes(String(u.stopId)))
-      .map(u=>{const t=(u.arrival??u.departure??null);return t?{routeId:u.routeId,stopId:u.stopId,eta:t-now}:null;})
-      .filter(Boolean).filter(x=>x.eta>-30).sort((a,b)=>a.eta-b.eta).slice(0,10);
+      .filter(u => String(u.stopId) === stopIdStr) // exact stop only
+      .map(u => {
+        const t = (u.arrival ?? u.departure ?? null);
+        return t ? { routeId:u.routeId, stopId:u.stopId, eta:t - now } : null;
+      })
+      .filter(Boolean)
+      .filter(x=>x.eta>-30)
+      .sort((a,b)=>a.eta-b.eta)
+      .slice(0,10);
+
     renderNext(list);
     lastStamp=new Date();foot.textContent=`Last updated ${lastStamp.toLocaleTimeString()}`;
     must('#btnRefresh').hidden=false;
@@ -179,24 +187,27 @@ async function bootstrap(){
     if(_clockSkewMs===0) await syncServerTime();
     const [stops,routes]=await Promise.all([getStops(),getRoutes()]);
     allStops=stops||[];buildRouteIndexes(routes);buildStopIndex(allStops);
+
     const saved=localStorage.getItem(LOCAL_KEY);
-    if(saved&&stopsById[saved]){nearest=stopsById[saved];updateWhere();await refresh();setInterval(refresh,10000);return;}
+    if(saved&&stopsById[saved]){
+      nearest=stopsById[saved]; updateWhere(); await refresh(); setInterval(refresh,10000); return;
+    }
+
     if('geolocation'in navigator){
       navigator.geolocation.getCurrentPosition(async pos=>{
         pin={lat:pos.coords.latitude,lon:pos.coords.longitude};
-        const pick=pickNearest(allStops,pin.lat,pin.lon);
-        nearest=pick.best;siblings=pick.sibs;
+        nearest=pickNearest(allStops,pin.lat,pin.lon);
         updateWhere();
         const d=nearest.d;
-        if(d>SUSPICIOUS_M){err.textContent='Location may be approximate — verify stop.';openChooser();}
-        await refresh();setInterval(refresh,10000);
-      },_=>{
+        if(d>SUSPICIOUS_M){ err.textContent='Location may be approximate — verify stop.'; openChooser(); }
+        await refresh(); setInterval(refresh,10000);
+      }, _=>{
         err.textContent='Location unavailable; search and pick your stop.';
-        openChooser();setInterval(refresh,10000);
-      },{enableHighAccuracy:true,timeout:10000,maximumAge:0});
+        openChooser(); setInterval(refresh,10000);
+      }, {enableHighAccuracy:true,timeout:10000,maximumAge:0});
     }else{
       err.textContent='No geolocation; search and pick your stop.';
-      openChooser();setInterval(refresh,10000);
+      openChooser(); setInterval(refresh,10000);
     }
   }catch(e){status.textContent='Startup error';err.textContent=e.message||String(e);}
 }
