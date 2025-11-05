@@ -168,31 +168,37 @@ async function refresh() {
     const { updates } = await getTrips([stopIdStr]);
     const now = nowSec();
 
-    // Fallback: get current vehicles and cross-check their position
-    const { entity = [] } = await fetchJSON('/api/vehicles').catch(() => ({}));
+    // Optional vehicle feed (used only to reject clearly wrong routes)
+    let entity = [];
+    try {
+      const v = await fetchJSON('/api/vehicles');
+      entity = v.entity || [];
+    } catch { /* ignore if vehicle feed down */ }
 
     const list = (updates || [])
       .filter(u => String(u.stopId) === stopIdStr)
       .map(u => {
         const t = u.arrival ?? u.departure;
+        if (!t) return null;
+
+        // try to match a vehicle, but don't require one
         const veh = entity.find(e =>
           e.vehicle?.trip?.routeId === u.routeId ||
           e.vehicle?.trip?.tripId === u.tripId
         );
-        // geo-filter: keep only if vehicle is near the pinned stop
-        let nearby = true;
-        if (veh && veh.vehicle?.position) {
+        let good = true;
+        if (veh?.vehicle?.position) {
           const d = haversine(
             nearest.lat,
             nearest.lon,
             veh.vehicle.position.latitude,
             veh.vehicle.position.longitude
           );
-          nearby = d < 500; // within 500 m of pinned stop
+          // only reject if the bus is *clearly* nowhere near the stop
+          if (d > 2000) good = false;
         }
-        return t && nearby
-          ? { routeId: u.routeId, stopId: u.stopId, eta: t - now }
-          : null;
+
+        return good ? { routeId: u.routeId, stopId: u.stopId, eta: t - now } : null;
       })
       .filter(Boolean)
       .filter(x => x.eta > -30)
