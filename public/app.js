@@ -154,54 +154,72 @@ function updateWhere(){
 
 // ---------- refresh ----------
 async function refresh() {
-  const spin = must('#spin'),
-        status = must('#status'),
-        err = must('#err'),
-        foot = must('#foot');
+  const spin  = must('#spin'),
+        status= must('#status'),
+        err   = must('#err'),
+        foot  = must('#foot');
+
+  const pick = (obj, ...keys) => keys.reduce((v,k)=>v ?? obj?.[k], undefined);
+
   try {
     spin.style.display = 'inline-block';
     status.textContent = 'Updating…';
     err.textContent = '';
 
     if (!nearest) throw new Error('Pick a stop first.');
-    const stopIdStr = String(nearest.stop_id);
-    const { updates } = await getTrips([stopIdStr]);
-    const now = nowSec();
+
+    const stopIdStr = String(nearest.stop_id ?? nearest.stopId ?? nearest.id);
+    const tripsResp = await getTrips([stopIdStr]);
+    const updates   = tripsResp?.updates ?? [];
 
     // Optional vehicle feed (used only to reject clearly wrong routes)
     let entity = [];
     try {
       const v = await fetchJSON('/api/vehicles');
-      entity = v.entity || [];
+      entity = Array.isArray(v?.entity) ? v.entity : [];
     } catch { /* ignore if vehicle feed down */ }
 
-    const list = (updates || [])
-      .filter(u => String(u.stopId) === stopIdStr)
+    const now = nowSec();
+
+    const list = updates
+      // accept various possible key names for stop id
+      .filter(u => {
+        const sid = pick(u, 'stopId', 'stop_id', 'stop');
+        return String(sid) === stopIdStr;
+      })
       .map(u => {
-        const t = u.arrival ?? u.departure;
-        if (!t) return null;
+        // normalize time (arrival/departure) and units
+        let t = pick(u, 'arrival', 'arrival_time', 'departure', 'departure_time');
+        if (t == null) return null;
+        if (typeof t !== 'number') t = Number(t);
+        if (!Number.isFinite(t)) return null;
+        if (t > 1e12) t = Math.floor(t / 1000); // ms → s
+
+        // normalize route/trip ids for vehicle cross-check
+        const rid = pick(u, 'routeId', 'route_id', 'route');
+        const tid = pick(u, 'tripId', 'trip_id', 'trip');
+        const sid = pick(u, 'stopId', 'stop_id', 'stop');
 
         // try to match a vehicle, but don't require one
-        const veh = entity.find(e =>
-          e.vehicle?.trip?.routeId === u.routeId ||
-          e.vehicle?.trip?.tripId === u.tripId
-        );
+        const veh = entity.find(e => {
+          const trip  = e?.vehicle?.trip || {};
+          const vrid  = pick(trip, 'routeId', 'route_id');
+          const vtid  = pick(trip, 'tripId', 'trip_id');
+          return (vrid != null && vrid === rid) || (vtid != null && vtid === tid);
+        });
+
         let good = true;
-        if (veh?.vehicle?.position) {
-          const d = haversine(
-            nearest.lat,
-            nearest.lon,
-            veh.vehicle.position.latitude,
-            veh.vehicle.position.longitude
-          );
-          // only reject if the bus is *clearly* nowhere near the stop
+        const pos = veh?.vehicle?.position;
+        if (pos && Number.isFinite(pos.latitude) && Number.isFinite(pos.longitude)) {
+          const d = haversine(nearest.lat, nearest.lon, pos.latitude, pos.longitude);
+          // only reject if the bus is clearly nowhere near the stop
           if (d > 2000) good = false;
         }
 
-        return good ? { routeId: u.routeId, stopId: u.stopId, eta: t - now } : null;
+        return good ? { routeId: rid, stopId: sid, eta: t - now } : null;
       })
       .filter(Boolean)
-      .filter(x => x.eta > -30)
+      .filter(x => x.eta > -30)           // keep slightly late vehicles
       .sort((a, b) => a.eta - b.eta)
       .slice(0, 10);
 
@@ -210,7 +228,7 @@ async function refresh() {
     foot.textContent = `Last updated ${lastStamp.toLocaleTimeString()}`;
     must('#btnRefresh').hidden = false;
   } catch (e) {
-    err.textContent = e.message;
+    err.textContent = e?.message || String(e);
   } finally {
     spin.style.display = 'none';
     status.textContent = 'Live';
