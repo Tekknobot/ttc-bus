@@ -26,6 +26,8 @@ const S = {
   stopId: null,       // string
   route: null,        // string (short name or route_id)
   stops: [],          // [{ stop_id, name, lat, lon }]
+  siblings: [],       // sibling group (ids) including anchor
+  siblingIdx: 0,      // index into siblings
   timer: undefined,
 };
 
@@ -116,31 +118,50 @@ function nearestStop(stops, pin) {
   }
   return best ? { stop: best, distM: bestD } : null;
 }
-function siblingStops(stops, anchor, pin) {
-  const around = [];
+function computeSiblingGroup(stops, anchor, pin) {
+  if (!anchor) return [];
+  // all stops within radius, sorted by distance to pin (or anchor if no pin)
+  const center = pin || { lat: anchor.lat, lon: anchor.lon };
+  const group = [];
   for (const s of stops) {
     const d = haversineMeters({ lat: anchor.lat, lon: anchor.lon }, { lat: s.lat, lon: s.lon });
     if (d <= INCLUDE_SIBLING_WITHIN_M) {
-      const dp = pin ? haversineMeters(pin, { lat: s.lat, lon: s.lon }) : Infinity;
-      around.push({ stop: s, dFromPin: dp });
+      const dPin = haversineMeters(center, { lat: s.lat, lon: s.lon });
+      group.push({ id: String(s.stop_id), dPin });
     }
   }
-  around.sort((a,b) => a.dFromPin - b.dFromPin);
-  return around.slice(0, 3).map(x => x.stop);
+  // ensure anchor is included even if rounding issues
+  if (!group.some(g => g.id === String(anchor.stop_id))) {
+    const dPin = haversineMeters(center, { lat: anchor.lat, lon: anchor.lon });
+    group.push({ id: String(anchor.stop_id), dPin });
+  }
+  group.sort((a,b) => a.dPin - b.dPin);
+  // unique ids
+  const unique = [];
+  const seen = new Set();
+  for (const g of group) {
+    if (!seen.has(g.id)) { unique.push(g.id); seen.add(g.id); }
+  }
+  return unique;
 }
-
-// Case-insensitive route match against either short_name or route_id
-function routeMatches(routePinned, item) {
-  if (!routePinned) return true;
-  const q = String(routePinned).trim().toLowerCase();
-  const a = (item.route_short_name ?? "").toString().toLowerCase();
-  const b = (item.route_id ?? "").toString().toLowerCase();
-  return a === q || b === q;
+function indexOfSibling(siblings, stopId) {
+  const i = siblings.findIndex(id => String(id) === String(stopId));
+  return i >= 0 ? i : 0;
+}
+function setStopAndRefresh(newStopId) {
+  S.stopId = String(newStopId);
+  saveStopId(S.stopId);
+  // recompute group to keep UI consistent
+  const anchor = S.stops.find(s => String(s.stop_id) === S.stopId);
+  S.siblings = computeSiblingGroup(S.stops, anchor, S.pin);
+  S.siblingIdx = indexOfSibling(S.siblings, S.stopId);
+  renderWhere(); // update header controls immediately
+  tick();        // refresh arrivals now
 }
 
 // ======= Render =======
 function renderWhere() {
-  // Stack: Stop (bold), Street, Nearest — no route, no lat/lon
+  // Stack: Stop (bold), Street, Nearest — plus sibling switcher (when available)
   const cur = S.stops.find(s => String(s.stop_id) === String(S.stopId));
   const stopLine = cur
     ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})`
@@ -153,23 +174,29 @@ function renderWhere() {
     nearestLine = fmtDist(d);
   }
 
+  const hasSiblings = S.siblings.length > 1;
+  const idxLabel = hasSiblings ? `(${S.siblingIdx + 1}/${S.siblings.length})` : "";
+
   // Build stacked rows; only render rows that exist
   const rows = [];
-  rows.push(
-    `<div style="font-weight:700">${stopLine}</div>`
-  );
+  rows.push(`<div style="font-weight:700">${stopLine}</div>`);
   if (streetLine) {
-    rows.push(
-      `<div class="meta" style="color:var(--muted)">Street: <span style="color:inherit">${escapeHtml(streetLine)}</span></div>`
-    );
+    rows.push(`<div class="meta" style="color:var(--muted)">Street: <span style="color:inherit">${escapeHtml(streetLine)}</span></div>`);
   }
   if (nearestLine) {
-    rows.push(
-      `<div class="meta" style="color:var(--muted)">Nearest: <span class="dist" style="font-weight:800;color:inherit">${nearestLine}</span></div>`
-    );
+    rows.push(`<div class="meta" style="color:var(--muted)">Nearest: <span class="dist" style="font-weight:800;color:inherit">${nearestLine}</span></div>`);
   }
 
-  // Single child container so the parent .where (which is flex-row) won’t try to lay out multiple columns
+  // Sibling switcher UI (Prev/Next)
+  const switcher = hasSiblings ? `
+    <div style="display:flex; gap:8px; margin-top:6px">
+      <button id="sibPrev" type="button" aria-label="Previous nearby stop" style="padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);cursor:pointer">Prev</button>
+      <div class="meta" style="align-self:center;color:var(--muted)">${idxLabel}</div>
+      <button id="sibNext" type="button" aria-label="Next nearby stop" style="padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card);cursor:pointer">Next</button>
+    </div>
+  ` : "";
+
+  // Single child container so the parent .where (flex-row) won’t try to lay out multiple columns
   els.where.innerHTML = `
     <div style="
       display:grid;
@@ -180,13 +207,32 @@ function renderWhere() {
       word-break: break-word;
     ">
       ${rows.join("")}
+      ${switcher}
     </div>
   `;
+
+  // Wire buttons (event delegation safe to re-run)
+  if (hasSiblings) {
+    const prevBtn = document.getElementById("sibPrev");
+    const nextBtn = document.getElementById("sibNext");
+    if (prevBtn) prevBtn.onclick = () => {
+      if (!S.siblings.length) return;
+      S.siblingIdx = (S.siblingIdx - 1 + S.siblings.length) % S.siblings.length;
+      setStopAndRefresh(S.siblings[S.siblingIdx]);
+    };
+    if (nextBtn) nextBtn.onclick = () => {
+      if (!S.siblings.length) return;
+      S.siblingIdx = (S.siblingIdx + 1) % S.siblings.length;
+      setStopAndRefresh(S.siblings[S.siblingIdx]);
+    };
+  }
 }
+
 function renderFootStamp() {
   const ts = new Date();
   setText(els.foot, `Updated ${ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`);
 }
+
 function rowHTML(a) {
   const whenSec = parseToEpochSeconds(a.arrival_time);
   const min = minsFromNow(whenSec);
@@ -208,6 +254,7 @@ function rowHTML(a) {
     </li>
   `;
 }
+
 function renderList(items) {
   clear(els.list);
   if (!items?.length) {
@@ -222,10 +269,13 @@ async function fetchMergedArrivals() {
   const anchor = S.stops.find(s => String(s.stop_id) === String(S.stopId));
   if (!anchor) return [];
 
-  const sibs = siblingStops(S.stops, anchor, S.pin);
-  const ids = [anchor.stop_id, ...sibs.map(s => s.stop_id)]
-    .map(String)
-    .filter((v, i, arr) => arr.indexOf(v) === i);
+  // Ensure sibling group is available
+  if (!S.siblings.length) {
+    S.siblings = computeSiblingGroup(S.stops, anchor, S.pin);
+    S.siblingIdx = indexOfSibling(S.siblings, S.stopId);
+  }
+
+  const ids = S.siblings.length ? S.siblings : [String(anchor.stop_id)];
 
   // Fetch each stop's arrivals
   const results = await Promise.allSettled(ids.map(id => getArrivals(id)));
@@ -355,6 +405,11 @@ async function boot() {
       const best = nearestStop(S.stops, S.pin);
       if (best?.stop) { S.stopId = String(best.stop.stop_id); saveStopId(S.stopId); }
     }
+
+    // Build initial sibling group
+    const anchor = S.stops.find(s => String(s.stop_id) === String(S.stopId));
+    S.siblings = computeSiblingGroup(S.stops, anchor, S.pin);
+    S.siblingIdx = indexOfSibling(S.siblings, S.stopId);
 
     renderWhere();
     await tick();
