@@ -18,12 +18,13 @@ const VEHICLE_FALLBACK_WITHIN_M = 400;
 const REFRESH_MS = 10000;
 
 // ======= Storage keys =======
-const K = { PIN: "ttc.pin", STOP: "ttc.stopId" };
+const K = { PIN: "ttc.pin", STOP: "ttc.stopId", ROUTE: "ttc.route" };
 
 // ======= State =======
 const S = {
   pin: null,          // {lat, lon}
   stopId: null,       // string
+  route: null,        // string (short name or route_id)
   stops: [],          // [{ stop_id, name, lat, lon }]
   timer: undefined,
 };
@@ -35,6 +36,9 @@ function setText(el, txt) { if (el) el.textContent = txt ?? ""; }
 function clear(el) { if (el) el.innerHTML = ""; }
 function escapeHtml(s) {
   return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+}
+function titleCase(s) {
+  return String(s).toLowerCase().replace(/\b([a-z])/g, (_,c)=>c.toUpperCase());
 }
 
 function haversineMeters(a, b) {
@@ -63,23 +67,38 @@ function minsFromNow(epochSec) {
 function etaClass(min) { if (min == null) return ""; if (min <= 3) return "good"; if (min <= 7) return "warn"; return ""; }
 function fmtEta(min) { if (min == null) return "—"; if (min <= 0) return "due"; if (min === 1) return "1 min"; return `${min} min`; }
 
+// Extract a “street name” from TTC stop names like “DUNDAS ST WEST AT LANSDOWNE AVE”
+function extractStreet(stopName) {
+  if (!stopName) return null;
+  const s = String(stopName);
+  const splitters = [" AT ", " @ ", " - ", " / "];
+  for (const sp of splitters) {
+    const i = s.indexOf(sp);
+    if (i > 0) return titleCase(s.slice(0, i).trim());
+  }
+  return titleCase(s.trim());
+}
+
 // ======= URL / Storage =======
 function getParams() {
   const sp = new URLSearchParams(window.location.search);
   const stopId = sp.get("stop") || null;
   const pinStr = sp.get("pin");
+  const route = sp.get("route"); // short name or route_id
   let pin = null;
   if (pinStr) {
     const [a,b] = pinStr.split(",").map(x => x.trim());
     const lat = Number(a), lon = Number(b);
     if (Number.isFinite(lat) && Number.isFinite(lon)) pin = { lat, lon };
   }
-  return { stopId, pin };
+  return { stopId, pin, route };
 }
 function savePin(pin) { try { localStorage.setItem(K.PIN, JSON.stringify(pin)); } catch {} }
 function loadPin() { try { const raw = localStorage.getItem(K.PIN); return raw ? JSON.parse(raw) : null; } catch { return null; } }
 function saveStopId(id) { try { localStorage.setItem(K.STOP, String(id)); } catch {} }
 function loadStopId() { try { return localStorage.getItem(K.STOP) || null; } catch { return null; } }
+function saveRoute(route) { try { if(route) localStorage.setItem(K.ROUTE, String(route)); else localStorage.removeItem(K.ROUTE);} catch {} }
+function loadRoute() { try { return localStorage.getItem(K.ROUTE) || null; } catch { return null; } }
 
 // ======= API =======
 async function api(path) { const r = await fetch(path,{credentials:"same-origin"}); if(!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.json(); }
@@ -110,17 +129,32 @@ function siblingStops(stops, anchor, pin) {
   return around.slice(0, 3).map(x => x.stop);
 }
 
+// Case-insensitive route match against either short_name or route_id
+function routeMatches(routePinned, item) {
+  if (!routePinned) return true;
+  const q = String(routePinned).trim().toLowerCase();
+  const a = (item.route_short_name ?? "").toString().toLowerCase();
+  const b = (item.route_id ?? "").toString().toLowerCase();
+  return a === q || b === q;
+}
+
 // ======= Render =======
 function renderWhere() {
   const pinTxt = S.pin ? `${S.pin.lat.toFixed(5)}, ${S.pin.lon.toFixed(5)}` : "—";
   const cur = S.stops.find(s => String(s.stop_id) === String(S.stopId));
   const stopTxt = cur ? `${escapeHtml(cur.name)} (#${escapeHtml(cur.stop_id)})` : "No stop";
-  let distTxt = "";
+  const street = cur ? extractStreet(cur.name) : null;
+
+  let tail = "";
   if (S.pin && cur) {
     const d = haversineMeters(S.pin, { lat: cur.lat, lon: cur.lon });
-    distTxt = ` • <span class="meta">nearest:</span> <span class="dist">${fmtDist(d)}</span>`;
+    tail += ` • <span class="meta">nearest:</span> <span class="dist">${fmtDist(d)}</span>`;
   }
-  els.where.innerHTML = `${pinTxt} • ${stopTxt}${distTxt}`;
+  if (S.route) {
+    tail += ` • <span class="meta">route:</span> <span class="dist">${escapeHtml(S.route)}</span>`;
+  }
+
+  els.where.innerHTML = `${pinTxt} • ${stopTxt}${tail}${street ? ` • <span class="meta">street:</span> <span class="dist">${escapeHtml(street)}</span>` : ""}`;
 }
 function renderFootStamp() {
   const ts = new Date();
@@ -148,7 +182,7 @@ function rowHTML(a) {
 function renderList(items) {
   clear(els.list);
   if (!items?.length) {
-    els.list.innerHTML = `<div class="empty">No upcoming trips.</div>`;
+    els.list.innerHTML = `<div class="empty">No upcoming trips${S.route ? ` for route ${escapeHtml(S.route)}` : ""}.</div>`;
     return;
   }
   els.list.innerHTML = items.map(rowHTML).join("");
@@ -171,10 +205,16 @@ async function fetchMergedArrivals() {
     if (p.status !== "fulfilled") return;
     const stopId = ids[idx];
     const stop = S.stops.find(s => String(s.stop_id) === String(stopId));
-    (p.value?.arrivals ?? []).forEach(a => arrivals.push({
-      ...a,
-      __sub: stop ? `At stop #${escapeHtml(stop.stop_id)}` : `At stop #${escapeHtml(stopId)}`
-    }));
+    (p.value?.arrivals ?? []).forEach(a => {
+      if (!routeMatches(S.route, a)) return; // filter by pinned route if present
+      const street = stop ? extractStreet(stop.name) : null;
+      arrivals.push({
+        ...a,
+        __sub: stop
+          ? `At stop #${escapeHtml(stop.stop_id)}${street ? ` — ${escapeHtml(street)}` : ""}`
+          : `At stop #${escapeHtml(stopId)}`
+      });
+    });
   });
 
   arrivals.sort((a,b) => {
@@ -183,11 +223,12 @@ async function fetchMergedArrivals() {
     return ma - mb;
   });
 
-  // Vehicle fallback if still empty
+  // Vehicle fallback if still empty (respect pinned route if present)
   if (!arrivals.length && S.pin) {
     try {
       const vehicles = await getVehicles();
       const near = (vehicles || [])
+        .filter(v => routeMatches(S.route, v))
         .map(v => ({ v, d: haversineMeters(S.pin, { lat: v.lat, lon: v.lon }) }))
         .filter(x => x.d <= VEHICLE_FALLBACK_WITHIN_M)
         .sort((a,b) => a.d - b.d)
@@ -249,8 +290,9 @@ async function boot() {
     show(els.btnRefresh);
 
     // URL overrides first
-    const { stopId: urlStop, pin: urlPin } = getParams();
+    const { stopId: urlStop, pin: urlPin, route: urlRoute } = getParams();
     if (urlPin) { S.pin = urlPin; savePin(S.pin); }
+    if (urlRoute) { S.route = urlRoute; saveRoute(S.route); }
 
     // Load stops catalog
     S.stops = await getStops();
@@ -270,6 +312,12 @@ async function boot() {
           );
         });
       }
+    }
+
+    // Route fallback (persisted)
+    if (!S.route) {
+      const r = loadRoute();
+      if (r) S.route = r;
     }
 
     // Stop fallback chain
