@@ -10,7 +10,13 @@ const PORT = process.env.PORT || 5173;
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const STOPS_PATH = path.join(ROOT, 'stops.json');
+const ROUTES_PATH = path.join(ROOT, 'routes.json');
 const PROTO_PATH = path.join(ROOT, 'gtfs-realtime.proto');
+
+// Keep the GTFS zip in tmp so both stops and routes can be parsed
+const TMP_GTFS_ZIP = path.join(os.tmpdir(), 'ttc_gtfs.zip');
+const GTFS_ZIP_URL =
+  'https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/7795b45e-e65a-4465-81fc-c36b9dfff169/resource/cfb6b2b8-6191-41e3-bda1-b175c51148cb/download/TTC%20Routes%20and%20Schedules%20Data.zip';
 
 let FeedMessage = null;
 async function loadProto() {
@@ -41,32 +47,49 @@ async function fetchBufferOrDie(url) {
   return Buffer.from(await r.arrayBuffer());
 }
 
+// Very small CSV reader that handles quoted commas
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (const line of lines) {
+    if (!line) continue;
+    const row = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        // handle escaped quotes ("")
+        if (inQ && line[i+1] === '"') { cur += '"'; i++; continue; }
+        inQ = !inQ;
+        continue;
+      }
+      if (ch === ',' && !inQ) { row.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+    row.push(cur);
+    out.push(row);
+  }
+  return out;
+}
+
+async function ensureGtfsZip() {
+  if (fs.existsSync(TMP_GTFS_ZIP)) return;
+  const buf = await fetchBufferOrDie(GTFS_ZIP_URL);
+  fs.writeFileSync(TMP_GTFS_ZIP, buf);
+}
+
 async function ensureStops() {
   if (fs.existsSync(STOPS_PATH)) return;
-  console.log('Downloading TTC GTFS (stops)…');
-  const url = 'https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/7795b45e-e65a-4465-81fc-c36b9dfff169/resource/cfb6b2b8-6191-41e3-bda1-b175c51148cb/download/TTC%20Routes%20and%20Schedules%20Data.zip';
-  const tmpZip = path.join(os.tmpdir(), 'ttc_gtfs.zip');
-  const buf = await fetchBufferOrDie(url);
-  fs.writeFileSync(tmpZip, buf);
-  const zip = new AdmZip(tmpZip);
+  console.log('Downloading TTC GTFS (zip) and extracting stops…');
+  await ensureGtfsZip();
+  const zip = new AdmZip(TMP_GTFS_ZIP);
   const entry = zip.getEntry('stops.txt');
   if (!entry) throw new Error('stops.txt not found in GTFS zip');
   const csv = entry.getData().toString('utf-8');
 
-  // parse stops (keep stop_code too)
-  const lines = csv.split(/\r?\n/).filter(Boolean);
-  const headers = lines.shift().split(',');
+  const rows = parseCsv(csv);
+  const headers = rows.shift();
   const idx = Object.fromEntries(headers.map((h,i)=>[h,i]));
-  const rows = lines.map(line=>{
-    const out=[]; let cur=''; let inQ=false;
-    for (let i=0;i<line.length;i++){
-      const ch=line[i];
-      if(ch==='\"'){ inQ=!inQ; continue; }
-      if(ch===',' && !inQ){ out.push(cur); cur=''; } else { cur+=ch; }
-    }
-    out.push(cur);
-    return out;
-  });
 
   const stops = rows.map(cols => ({
     stop_id: cols[idx.stop_id],
@@ -78,6 +101,29 @@ async function ensureStops() {
 
   fs.writeFileSync(STOPS_PATH, JSON.stringify(stops));
   console.log(`Wrote ${stops.length} stops to ${STOPS_PATH}`);
+}
+
+async function ensureRoutes() {
+  if (fs.existsSync(ROUTES_PATH)) return;
+  console.log('Extracting TTC GTFS (routes)…');
+  await ensureGtfsZip();
+  const zip = new AdmZip(TMP_GTFS_ZIP);
+  const entry = zip.getEntry('routes.txt');
+  if (!entry) throw new Error('routes.txt not found in GTFS zip');
+  const csv = entry.getData().toString('utf-8');
+
+  const rows = parseCsv(csv);
+  const headers = rows.shift();
+  const idx = Object.fromEntries(headers.map((h,i)=>[h,i]));
+
+  const routes = rows.map(cols => ({
+    route_id: cols[idx.route_id],
+    short_name: cols[idx.route_short_name] || '',
+    long_name: cols[idx.route_long_name] || ''
+  })).filter(r => r.route_id);
+
+  fs.writeFileSync(ROUTES_PATH, JSON.stringify(routes));
+  console.log(`Wrote ${routes.length} routes to ${ROUTES_PATH}`);
 }
 
 async function fetchGtfsRt(url){
@@ -106,6 +152,12 @@ app.get('/api/health', (_req, res) => {
 app.get('/api/stops', async (_req,res)=>{
   res.setHeader('Content-Type','application/json');
   try { await ensureStops(); res.sendFile(STOPS_PATH); }
+  catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
+});
+
+app.get('/api/routes', async (_req,res)=>{
+  res.setHeader('Content-Type','application/json');
+  try { await ensureRoutes(); res.sendFile(ROUTES_PATH); }
   catch(e){ res.status(500).json({error:String(e), details:e.details||null}); }
 });
 
@@ -151,7 +203,7 @@ app.get('/api/vehicles', async (_req,res)=>{
 
 app.use(express.static(PUBLIC_DIR));
 
-// Default route to your SPA/homepage (helps avoid "Cannot GET /")
+// Default route to your SPA/homepage
 app.get('*', (_req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
   if (fs.existsSync(indexPath)) res.sendFile(indexPath);
@@ -162,6 +214,7 @@ app.listen(PORT, async () => {
   try {
     await loadProto();
     await ensureStops();
+    await ensureRoutes();
     console.log(`Open http://localhost:${PORT}`);
   } catch(e){
     console.error('Startup error:', e);

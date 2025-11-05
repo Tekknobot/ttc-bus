@@ -13,6 +13,7 @@ const haversine = (a,b,c,d)=>{
   const A=Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
   return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));
 };
+// Use “metres / kilometres”
 const fmtKm = m => m < 1000 ? `${Math.round(m)} metres` : `${(m/1000).toFixed(2)} kilometres`;
 const nowSec = () => Math.floor(Date.now()/1000);
 
@@ -31,6 +32,7 @@ async function fetchJSON(url){
 
 // ---------- API wrappers ----------
 async function getStops(){ return fetchJSON('/api/stops'); }
+async function getRoutes(){ return fetchJSON('/api/routes'); }
 async function getTrips(stopIds){
   const qs = encodeURIComponent(stopIds.join(','));
   return fetchJSON('/api/trip-updates?stop='+qs);
@@ -39,6 +41,26 @@ async function getVehicles(){ return fetchJSON('/api/vehicles'); }
 
 // ---------- state ----------
 let nearest = null, siblings = [], lastStamp = null, user = null;
+
+// Route lookup indexes
+const routesById = Object.create(null);
+const routesByShort = Object.create(null);
+
+function buildRouteIndexes(routes) {
+  for (const r of routes || []) {
+    if (r.route_id) routesById[r.route_id] = r;
+    if (r.short_name) routesByShort[r.short_name] = r;
+  }
+}
+
+// Prefer "47 Lansdowne" if we can, else best available
+function routeLabel(routeId) {
+  if (!routeId) return 'Route';
+  const r = routesById[routeId] || routesByShort[routeId];
+  if (!r) return routeId;
+  if (r.short_name && r.long_name) return `${r.short_name} ${r.long_name}`;
+  return r.short_name || r.long_name || routeId;
+}
 
 // ---------- logic ----------
 function pickNearest(stops, lat, lon){
@@ -64,6 +86,7 @@ function renderArrivals(list, fallbackNote=''){
     for (const it of list) {
       const etaMin = it.eta === null ? null : Math.max(0, Math.round(it.eta / 60));
       const cls = etaMin === null ? 'eta' : (etaMin <= 3 ? 'eta good' : (etaMin <= 7 ? 'eta warn' : 'eta'));
+      const label = routeLabel(it.routeId);
 
       const li = document.createElement('li');
       li.innerHTML = `
@@ -71,7 +94,7 @@ function renderArrivals(list, fallbackNote=''){
           <div class="${cls}">
             ${etaMin === null ? '—' : `${etaMin} min`}
           </div>
-          <span class="pill" title="Route number">Route ${it.routeId || '—'}</span>
+          <span class="pill" title="${label}">${label}</span>
         </div>
         <div class="sub">
           ${it.detail
@@ -122,17 +145,18 @@ async function refresh(){
         if (!veh || !veh.position) continue;
         const d = haversine(user.lat, user.lon, veh.position.latitude, veh.position.longitude);
         if (d <= 400) {
+          const rid = veh.trip?.routeId || veh.trip?.route_id;
           near.push({
-            routeId: veh.trip?.routeId || veh.trip?.route_id || 'Bus',
+            routeId: rid,
             stopId: veh.stopId || veh.stop_id || 'nearby',
             eta: null,
-            detail: `${Math.round(d)} m away`
+            detail: `${Math.round(d)} metres away`
           });
         }
       }
       if (near.length) {
         list = near.slice(0,8);
-        note = 'Nearby vehicles within ~400 m (fallback view).';
+        note = 'Nearby vehicles within ~400 metres (fallback view).';
       }
     }
 
@@ -150,7 +174,6 @@ async function refresh(){
 
 // ---------- init (runs after DOM because of `defer`) ----------
 function init(){
-  // Ensure required elements exist; throws early if markup is missing
   ['#status','#err','#spin','#where','#list','#foot','#btnRefresh'].forEach(must);
 
   const status = must('#status');
@@ -163,7 +186,11 @@ function init(){
 
   navigator.geolocation.getCurrentPosition(async pos=>{
     user = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-    const stops = await getStops();
+
+    // Fetch data needed up front: stops and routes
+    const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
+    buildRouteIndexes(routes);
+
     const pick = pickNearest(stops, user.lat, user.lon);
     nearest = pick.best; siblings = pick.sibs;
 
