@@ -41,14 +41,20 @@ async function getVehicles(){ return fetchJSON('/api/vehicles'); }
 // ---------- state ----------
 let nearest = null, siblings = [], lastStamp = null, user = null;
 
-// Route lookup indexes
+// Lookups
 const routesById = Object.create(null);
 const routesByShort = Object.create(null);
+const stopsById = Object.create(null);
 
 function buildRouteIndexes(routes) {
   for (const r of routes || []) {
     if (r.route_id) routesById[r.route_id] = r;
     if (r.short_name) routesByShort[r.short_name] = r;
+  }
+}
+function buildStopIndex(stops) {
+  for (const s of stops || []) {
+    if (s.stop_id) stopsById[s.stop_id] = s;
   }
 }
 
@@ -68,8 +74,9 @@ function pickNearest(stops, lat, lon){
     const d = haversine(lat,lon,s.lat,s.lon);
     if(!best || d < best.d) best = {...s, d};
   }
+  // tighter radius so we only catch opposite platform
   const sibs = stops.filter(s =>
-    haversine(best.lat, best.lon, s.lat, s.lon) <= 120 &&
+    haversine(best.lat, best.lon, s.lat, s.lon) <= 80 &&
     s.stop_id !== best.stop_id
   );
   return { best, sibs };
@@ -123,16 +130,30 @@ async function refresh(){
     status.textContent = 'Updating…';
     err.textContent = '';
 
-    if (!nearest) {
-      throw new Error('App not initialized yet (no nearest stop).');
-    }
+    if (!nearest) throw new Error('App not initialized yet (no nearest stop).');
 
     const ids = [nearest.stop_id, ...siblings.map(s=>s.stop_id)];
     const { updates } = await getTrips(ids);
 
+    // Keep only updates whose stopId is geographically close to the nearest stop (or user)
     const now = nowSec();
-    let list = (updates||[])
-      .map(u => ({ routeId: u.routeId, stopId: u.stopId, eta: (u.arrival||0) - now }))
+    const baseLat = (user && user.lat) || nearest.lat;
+    const baseLon = (user && user.lon) || nearest.lon;
+
+    const MAX_STOP_DISTANCE_M = 180; // geo sanity window
+
+    let list = (updates || [])
+      .filter(u => {
+        const stop = stopsById[u.stopId];
+        if (!stop) return false;
+        const d = haversine(baseLat, baseLon, stop.lat, stop.lon);
+        return d <= MAX_STOP_DISTANCE_M;
+      })
+      .map(u => ({
+        routeId: u.routeId,
+        stopId: u.stopId,
+        eta: (u.arrival || 0) - now
+      }))
       .filter(x => x.eta > -60)
       .sort((a,b) => a.eta - b.eta)
       .slice(0,12);
@@ -146,7 +167,7 @@ async function refresh(){
       for (const e of (v.entity||[])) {
         const veh = e.vehicle || e.vehiclePosition || e.vehicle_position;
         if (!veh || !veh.position) continue;
-        const d = haversine(user.lat, user.lon, veh.position.latitude, veh.position.longitude);
+        const d = haversine(baseLat, baseLon, veh.position.latitude, veh.position.longitude);
         if (d <= 400) {
           const rid = veh.trip?.routeId || veh.trip?.route_id;
           near.push({
@@ -185,6 +206,7 @@ async function bootstrapWithCoords(lat, lon) {
     user = { lat, lon };
     const [stops, routes] = await Promise.all([getStops(), getRoutes()]);
     buildRouteIndexes(routes);
+    buildStopIndex(stops);
 
     const pick = pickNearest(stops, user.lat, user.lon);
     nearest = pick.best; siblings = pick.sibs;
