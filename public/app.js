@@ -168,6 +168,43 @@ function routeMatches(routePinned, item) {
   return a === q || b === q;
 }
 
+// Try to get a fresh browser location (preferred). Returns {lat, lon} or null.
+async function getFreshLocation() {
+  if (!navigator.geolocation) return null;
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 } // force fresh reading
+    );
+  });
+}
+
+// Replace pin & recompute nearest stop if it changed meaningfully
+function maybeUpdatePin(newPin, thresholdMeters = 25) {
+  if (!newPin) return false;
+  if (!S.pin) { S.pin = newPin; savePin(S.pin); return true; }
+  const moved = haversineMeters(S.pin, newPin);
+  if (moved >= thresholdMeters) {
+    S.pin = newPin;
+    savePin(S.pin);
+    // if user didn’t explicitly force a stop via URL, re-pick nearest
+    if (!new URLSearchParams(location.search).get("stop")) {
+      const best = nearestStop(S.stops, S.pin);
+      if (best?.stop) {
+        S.stopId = String(best.stop.stop_id);
+        saveStopId(S.stopId);
+        // rebuild siblings with the new anchor
+        const anchor = S.stops.find(s => String(s.stop_id) === S.stopId);
+        S.siblings = computeSiblingGroup(S.stops, anchor, S.pin);
+        S.siblingIdx = indexOfSibling(S.siblings, S.stopId);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 // ======= Render =======
 function renderWhere() {
   // Stack: Stop (bold), Street, Nearest — plus sibling switcher (when available)
@@ -391,20 +428,19 @@ async function boot() {
       if (r) S.route = r;
     }
 
-    // Pin fallback chain
-    if (!S.pin) {
-      const stored = loadPin();
-      if (stored) {
-        S.pin = stored;
+    // Pin resolution (prefer fresh geolocation every time unless URL pin is set)
+    if (urlPin) {
+      S.pin = urlPin;               // explicit override
+      savePin(S.pin);
+    } else {
+      // Always attempt a fresh read
+      const fresh = await getFreshLocation();
+      if (fresh) {
+        maybeUpdatePin(fresh, 10);  // overwrite saved pin if moved ≥10 m
       } else {
-        await new Promise((resolve) => {
-          if (!navigator.geolocation) return resolve();
-          navigator.geolocation.getCurrentPosition(
-            (pos) => { S.pin = { lat: pos.coords.latitude, lon: pos.coords.longitude }; savePin(S.pin); resolve(); },
-            () => resolve(),
-            { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 }
-          );
-        });
+        // Fall back to saved pin only if geolocation is unavailable/denied
+        const stored = loadPin();
+        if (stored) S.pin = stored;
       }
     }
 
@@ -419,6 +455,15 @@ async function boot() {
     const anchor = S.stops.find(s => String(s.stop_id) === String(S.stopId));
     S.siblings = computeSiblingGroup(S.stops, anchor, S.pin);
     S.siblingIdx = indexOfSibling(S.siblings, S.stopId);
+
+    // One more quick location check shortly after load to catch late GPS locks
+    setTimeout(async () => {
+      const fresh2 = await getFreshLocation();
+      if (maybeUpdatePin(fresh2, 10)) {
+        renderWhere();
+        tick(); // refresh arrivals if pin changed
+      }
+    }, 3500);
 
     renderWhere();
     await tick();
